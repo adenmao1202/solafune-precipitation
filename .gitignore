@@ -1,0 +1,27 @@
+# Data - never commit (too large, lives on Google Drive / T7)
+data/
+
+# Model weights
+*.pth
+*.pt
+*.ckpt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.ipynb_checkpoints/
+
+# macOS junk (exFAT AppleDouble files)
+.DS_Store
+._*
+**/.DS_Store
+**/._*
+
+# Submissions (generated output)
+submission/
+submission.zip
+
+# Logs
+*.log
+wandb/
