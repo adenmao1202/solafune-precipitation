@@ -5,7 +5,9 @@ Week 1 Baseline 訓練腳本。
   python train.py --data_dir /path/to/data --csv_train train.csv
 """
 import argparse
+import csv
 import json
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -94,7 +96,37 @@ class CombinedLoss(nn.Module):
 # ---------------------------------------------------------------------------
 # 主訓練迴圈
 # ---------------------------------------------------------------------------
+def save_experiment(args, best_val_rmse: float, epochs_run: int):
+    log_path = Path("experiments.csv")
+    fieldnames = ["run_name", "datetime", "epochs_run", "best_val_rmse",
+                  "lr", "batch_size", "encoder", "lb_score", "notes"]
+    row = {
+        "run_name":       args.run_name,
+        "datetime":       datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "epochs_run":     epochs_run,
+        "best_val_rmse":  f"{best_val_rmse:.4f}",
+        "lr":             args.lr,
+        "batch_size":     args.batch_size,
+        "encoder":        args.encoder,
+        "lb_score":       "",
+        "notes":          "",
+    }
+    write_header = not log_path.exists()
+    with open(log_path, "a", newline="") as f:
+        writer = csv.DictWriter(f, fieldnames=fieldnames)
+        if write_header:
+            writer.writeheader()
+        writer.writerow(row)
+    print(f"Experiment logged -> {log_path}")
+
+
 def train(args):
+    run_dir = Path("runs") / args.run_name
+    run_dir.mkdir(parents=True, exist_ok=True)
+    with open(run_dir / "args.json", "w") as f:
+        json.dump(vars(args), f, indent=2)
+    print(f"Run: {args.run_name}  (output -> {run_dir})")
+
     device = get_device()
     print(f"Using device: {device}")
 
@@ -145,8 +177,10 @@ def train(args):
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")
     patience_counter = 0
+    epochs_run = 0
 
     for epoch in range(1, args.epochs + 1):
+        epochs_run = epoch
         # --- Train ---
         model.train()
         train_loss = 0.0
@@ -189,7 +223,7 @@ def train(args):
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
             patience_counter = 0
-            torch.save(model.state_dict(), "best_model.pth")
+            torch.save(model.state_dict(), run_dir / "best_model.pth")
             print(f"  -> Saved best model (RMSE={best_val_rmse:.4f})")
         else:
             patience_counter += 1
@@ -199,6 +233,7 @@ def train(args):
                 break
 
     print(f"\nTraining done. Best val RMSE: {best_val_rmse:.4f}")
+    save_experiment(args, best_val_rmse, epochs_run)
 
 
 if __name__ == "__main__":
@@ -216,5 +251,7 @@ if __name__ == "__main__":
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
     parser.add_argument("--early_stop_patience", type=int, default=10,
                         help="Stop training if val RMSE does not improve for this many epochs.")
+    parser.add_argument("--run_name", default=datetime.now().strftime("%Y%m%d_%H%M"),
+                        help="Experiment name. Output saved to runs/{run_name}/")
     args = parser.parse_args()
     train(args)
