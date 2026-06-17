@@ -93,6 +93,8 @@ def train(args):
             stats = json.load(f)
 
     # 2. Dataset
+    from tqdm import tqdm
+    print("Loading dataset...")
     input_size = (args.input_size, args.input_size) if args.input_size else None
     full_ds = PrecipDataset(
         csv_path=Path(args.csv_train),
@@ -105,6 +107,7 @@ def train(args):
     n_train = len(full_ds) - n_val
     train_ds, val_ds = random_split(full_ds, [n_train, n_val],
                                      generator=torch.Generator().manual_seed(42))
+    print(f"Dataset ready: {n_train} train / {n_val} val samples")
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -113,7 +116,9 @@ def train(args):
                               shuffle=False, num_workers=args.num_workers, pin_memory=pin)
 
     # 3. Model
+    print("Building model...")
     model = build_model(encoder_name=args.encoder).to(device)
+    print("Model ready.")
 
     # 4. Optimizer + Scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
@@ -129,7 +134,8 @@ def train(args):
         # --- Train ---
         model.train()
         train_loss = 0.0
-        for inputs, targets, _ in train_loader:
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch:03d} [train]", leave=False)
+        for inputs, targets, _ in train_bar:
             inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
@@ -141,13 +147,15 @@ def train(args):
             scaler.step(optimizer)
             scaler.update()
             train_loss += loss.item()
+            train_bar.set_postfix(loss=f"{loss.item():.4f}")
         scheduler.step()
 
         # --- Validate ---
         model.eval()
         sq_errors = []
         with torch.no_grad():
-            for inputs, targets, _ in val_loader:
+            val_bar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [val]  ", leave=False)
+            for inputs, targets, _ in val_bar:
                 inputs, targets = inputs.to(device), targets.to(device)
                 with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                     preds = model(inputs)
