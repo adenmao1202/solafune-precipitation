@@ -57,8 +57,9 @@ def predict(args):
 
     result_rows = []
 
+    from tqdm import tqdm
     with torch.no_grad():
-        for inputs, _, unique_ids in loader:
+        for inputs, _, unique_ids in tqdm(loader, desc="Predicting"):
             inputs = inputs.to(device)
             # preds: (B, 1, sat_H, sat_W) — satellite native resolution
             preds = model(inputs)
