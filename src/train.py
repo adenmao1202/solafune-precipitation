@@ -26,10 +26,10 @@ def compute_stats(csv_path: Path, data_dir: Path, out_path: Path, max_samples: i
 
     df = pd.read_csv(csv_path)
     if max_samples > 0:
-        df = df.groupby("satellite_target", group_keys=False).apply(
-            lambda g: g.sample(min(len(g), max_samples // 3), random_state=42),
-            include_groups=False,
-        ).reset_index(drop=True)
+        df = pd.concat([
+            g.sample(min(len(g), max_samples // 3), random_state=42)
+            for _, g in df.groupby("satellite_target")
+        ]).reset_index(drop=True)
     accum = {}  # satellite -> {band_idx -> [values]}
 
     from tqdm import tqdm
