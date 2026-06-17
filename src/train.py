@@ -160,9 +160,11 @@ def train(args):
                 with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                     preds = model(inputs)
                 # expm1 還原到原始降水空間再計算 RMSE
-                preds_real   = torch.expm1(preds.float().clamp(min=0))
+                # clamp max=8: expm1(8)~2981 mm/hr, 防止未收斂模型數值溢位
+                preds_real   = torch.expm1(preds.float().clamp(0, 8))
                 targets_real = torch.expm1(targets.float())
-                sq_errors.append(((preds_real - targets_real) ** 2).cpu().numpy().ravel())
+                sq = (preds_real - targets_real) ** 2
+                sq_errors.append(sq[torch.isfinite(sq)].cpu().numpy().ravel())
 
         val_rmse = float(np.sqrt(np.concatenate(sq_errors).mean()))
         avg_train = train_loss / len(train_loader)
