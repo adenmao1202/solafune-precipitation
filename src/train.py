@@ -9,12 +9,28 @@ import json
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 
 from dataset import PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR
 from model import build_model
+
+
+def temporal_split(csv_path: Path, val_ratio: float = 0.2):
+    """每個地點按時間排序，取最後 val_ratio 為 val，避免 data leakage。"""
+    df = pd.read_csv(csv_path)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values(["name_location", "datetime"]).reset_index(drop=True)
+
+    train_idx, val_idx = [], []
+    for loc in df["name_location"].unique():
+        loc_idx = df[df["name_location"] == loc].index.tolist()
+        split = int(len(loc_idx) * (1 - val_ratio))
+        train_idx.extend(loc_idx[:split])
+        val_idx.extend(loc_idx[split:])
+    return train_idx, val_idx
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +119,10 @@ def train(args):
         is_train=True,
         input_size=input_size,
     )
-    n_val   = int(len(full_ds) * 0.1)
-    n_train = len(full_ds) - n_val
-    train_ds, val_ds = random_split(full_ds, [n_train, n_val],
-                                     generator=torch.Generator().manual_seed(42))
-    print(f"Dataset ready: {n_train} train / {n_val} val samples")
+    train_idx, val_idx = temporal_split(Path(args.csv_train), val_ratio=0.2)
+    train_ds = Subset(full_ds, train_idx)
+    val_ds   = Subset(full_ds, val_idx)
+    print(f"Temporal split: {len(train_ds)} train / {len(val_ds)} val samples")
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -191,7 +206,7 @@ if __name__ == "__main__":
     parser.add_argument("--data_dir",   required=True)
     parser.add_argument("--csv_train",  required=True)
     parser.add_argument("--encoder",    default="efficientnet-b4")
-    parser.add_argument("--epochs",     type=int,   default=30)
+    parser.add_argument("--epochs",     type=int,   default=60)
     parser.add_argument("--batch_size", type=int,   default=8)
     parser.add_argument("--lr",          type=float, default=1e-4)
     parser.add_argument("--num_workers",       type=int, default=0)
@@ -199,7 +214,7 @@ if __name__ == "__main__":
                         help="Resize all satellite inputs to (N×N). Required to batch mixed satellites.")
     parser.add_argument("--stats_max_samples", type=int, default=0,
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
-    parser.add_argument("--early_stop_patience", type=int, default=7,
+    parser.add_argument("--early_stop_patience", type=int, default=10,
                         help="Stop training if val RMSE does not improve for this many epochs.")
     args = parser.parse_args()
     train(args)
