@@ -78,17 +78,21 @@ def predict(args):
 
                 result_rows.append({"unique_id": unique_id, "gpm_imerg_filename": out_fname})
 
-    # evaluation_target.csv
-    pd.DataFrame(result_rows).to_csv(
-        Path(args.out_dir) / "evaluation_target.csv", index=False
-    )
+    # evaluation_target.csv — 保留原始所有欄位，只替換 gpm_imerg_filename
+    eval_df = pd.read_csv(args.csv_test)
+    result_df = pd.DataFrame(result_rows)
+    submission_csv = Path(args.out_dir) / "evaluation_target.csv"
+    eval_df[["unique_id", "gpm_imerg_filename"]].merge(
+        result_df[["unique_id"]], on="unique_id"
+    ).to_csv(submission_csv, index=False)
 
-    # 打包成 zip
+    # 打包成 zip：evaluation_target.csv 和 test_files/ 在根目錄
     zip_path = Path(args.out_dir).parent / "submission.zip"
-    with zipfile.ZipFile(zip_path, "w") as zf:
-        for p in Path(args.out_dir).rglob("*"):
-            zf.write(p, p.relative_to(Path(args.out_dir).parent))
-    print(f"Submission saved: {zip_path}")
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        zf.write(submission_csv, "evaluation_target.csv")
+        for p in out_dir.glob("*.tif"):
+            zf.write(p, Path("test_files") / p.name)
+    print(f"Submission saved: {zip_path} ({zip_path.stat().st_size / 1024**2:.1f} MB)")
 
 
 if __name__ == "__main__":
