@@ -32,7 +32,8 @@ def compute_stats(csv_path: Path, data_dir: Path, out_path: Path, max_samples: i
         ).reset_index(drop=True)
     accum = {}  # satellite -> {band_idx -> [values]}
 
-    for _, row in df.iterrows():
+    from tqdm import tqdm
+    for _, row in tqdm(df.iterrows(), total=len(df), desc="Computing stats"):
         sat = row["satellite_target"]
         filenames = parse_filenames(str(row["last_30_minutes_observation_filename"]))
         for fname in filenames:
