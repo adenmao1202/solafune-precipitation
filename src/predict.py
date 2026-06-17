@@ -35,7 +35,7 @@ def predict(args):
         is_train=False,
         input_size=input_size,
     )
-    loader = DataLoader(test_ds, batch_size=4, shuffle=False, num_workers=0)
+    loader = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=4)
 
     model = build_model()
     model.load_state_dict(torch.load(args.model_path, map_location=device))
@@ -76,7 +76,7 @@ def predict(args):
                 with rasterio.open(out_dir / out_fname, "w", **gpm_profile) as dst:
                     dst.write(arr.astype(np.float32), 1)
 
-                result_rows.append({"unique_id": unique_id, "filename": out_fname})
+                result_rows.append({"unique_id": unique_id, "gpm_imerg_filename": out_fname})
 
     # evaluation_target.csv
     pd.DataFrame(result_rows).to_csv(
