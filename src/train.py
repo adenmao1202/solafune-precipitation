@@ -122,6 +122,7 @@ def train(args):
     )
     criterion = CombinedLoss(mse_weight=0.7)
 
+    scaler = torch.cuda.amp.GradScaler(enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")
 
     for epoch in range(1, args.epochs + 1):
@@ -131,11 +132,14 @@ def train(args):
         for inputs, targets, _ in train_loader:
             inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
-            preds = model(inputs)
-            loss  = criterion(preds, targets)
-            loss.backward()
+            with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                preds = model(inputs)
+                loss  = criterion(preds, targets)
+            scaler.scale(loss).backward()
+            scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            optimizer.step()
+            scaler.step(optimizer)
+            scaler.update()
             train_loss += loss.item()
         scheduler.step()
 
@@ -145,10 +149,11 @@ def train(args):
         with torch.no_grad():
             for inputs, targets, _ in val_loader:
                 inputs, targets = inputs.to(device), targets.to(device)
-                preds = model(inputs)
+                with torch.cuda.amp.autocast(enabled=(device.type == "cuda")):
+                    preds = model(inputs)
                 # expm1 還原到原始降水空間再計算 RMSE
-                preds_real   = torch.expm1(preds.clamp(min=0))
-                targets_real = torch.expm1(targets)
+                preds_real   = torch.expm1(preds.float().clamp(min=0))
+                targets_real = torch.expm1(targets.float())
                 sq_errors.append(((preds_real - targets_real) ** 2).cpu().numpy().ravel())
 
         val_rmse = float(np.sqrt(np.concatenate(sq_errors).mean()))
