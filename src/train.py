@@ -129,6 +129,7 @@ def train(args):
 
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")
+    patience_counter = 0
 
     for epoch in range(1, args.epochs + 1):
         # --- Train ---
@@ -172,8 +173,15 @@ def train(args):
 
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
+            patience_counter = 0
             torch.save(model.state_dict(), "best_model.pth")
             print(f"  -> Saved best model (RMSE={best_val_rmse:.4f})")
+        else:
+            patience_counter += 1
+            print(f"  -> No improvement ({patience_counter}/{args.early_stop_patience})")
+            if patience_counter >= args.early_stop_patience:
+                print(f"\nEarly stopping at epoch {epoch}.")
+                break
 
     print(f"\nTraining done. Best val RMSE: {best_val_rmse:.4f}")
 
@@ -191,5 +199,7 @@ if __name__ == "__main__":
                         help="Resize all satellite inputs to (N×N). Required to batch mixed satellites.")
     parser.add_argument("--stats_max_samples", type=int, default=0,
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
+    parser.add_argument("--early_stop_patience", type=int, default=7,
+                        help="Stop training if val RMSE does not improve for this many epochs.")
     args = parser.parse_args()
     train(args)
