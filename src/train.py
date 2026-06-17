@@ -79,18 +79,16 @@ def compute_stats(csv_path: Path, data_dir: Path, out_path: Path, max_samples: i
 
 
 # ---------------------------------------------------------------------------
-# 損失函數：MSE + MAE 組合（對降水的偏態分布更穩健）
+# 損失函數：Weighted MSE，有雨 pixel 權重 6x，解決 80% 零值主導梯度的問題
 # ---------------------------------------------------------------------------
-class CombinedLoss(nn.Module):
-    def __init__(self, mse_weight: float = 0.7):
+class WeightedMSELoss(nn.Module):
+    def __init__(self, rain_weight: float = 5.0):
         super().__init__()
-        self.mse_weight = mse_weight
-        self.mse = nn.MSELoss()
-        self.mae = nn.L1Loss()
+        self.rain_weight = rain_weight
 
     def forward(self, pred, target):
-        return self.mse_weight * self.mse(pred, target) \
-             + (1 - self.mse_weight) * self.mae(pred, target)
+        weight = 1.0 + self.rain_weight * (target > 0).float()
+        return (weight * (pred - target) ** 2).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +170,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=args.lr * 0.01
     )
-    criterion = CombinedLoss(mse_weight=0.7)
+    criterion = WeightedMSELoss(rain_weight=5.0)
 
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")

@@ -4,7 +4,7 @@ from dataset import IN_CHANNELS
 
 
 def build_model(encoder_name: str = "efficientnet-b4",
-                encoder_weights: str = None) -> nn.Module:
+                encoder_weights: str = "imagenet") -> nn.Module:
     """
     UNet with EfficientNet-B4 encoder。
 

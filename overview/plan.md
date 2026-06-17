@@ -1,34 +1,21 @@
 # 競賽執行計畫
 
-*LB 第一：0.6848 RMSE（BlueLock）| 更新：2026-06-16*
+*LB 第一：0.6848 RMSE（BlueLock）| 更新：2026-06-17*
 *Submit 上限：每天 5 次（GMT 0:00 重置）*
 
 ---
 
-## 現況（截至 2026-06-16 晚）
+## 現況（截至 2026-06-17 晚）
 
-- Pipeline 全部完成並 smoke test 通過（val RMSE ~0.68 on 3 epochs / 102 samples）
-- GitHub repo 建立：https://github.com/adenmao1202/solafune-precipitation（private）
-- rclone 設定完成，Google Drive remote 名稱為 "gdrive"
-- train_dataset zip 上傳中（tmux session "upload"，--retries 20，ETA ~6hr）
-- evaluation_dataset zip 尚未上傳（train 傳完後立刻跑）
-- Vast.ai 帳號已建立並充值 $15，**尚未租機**
+| Run | Val RMSE (best) | LB RMSE | Rank | 主要改動 |
+|-----|----------------|---------|------|---------|
+| v1 | ~0.70 (random split, leakage) | 0.7300 | 13 | baseline |
+| v2 | 1.1563 (temporal split) | 0.7196 | 11 | temporal split, epochs=60 |
+| v3 | 進行中 | - | - | target clamp, ReduceLROnPlateau, Dropout |
 
----
-
-## 當前阻塞：等待 GDrive 上傳完成
-
-```bash
-# 確認上傳狀態
-tmux attach -t upload
-
-# 上傳完 train 後，立刻跑 evaluation
-COPYFILE_DISABLE=1 rclone copy \
-  "/Volumes/T7/new_code/solafune/data/evaluation_dataset_ba14cc1598034cc689eaf39b4f80c09d.zip" \
-  "gdrive:" \
-  --progress --transfers 1 --drive-chunk-size 256M \
-  --retries 20 --retries-sleep 30s
-```
+- Vast.ai instance C.41303819 正在跑 v3
+- GitHub repo：https://github.com/adenmao1202/solafune-precipitation（public）
+- 訓練指令：`--num_workers 16 --batch_size 64`
 
 ---
 
@@ -88,10 +75,18 @@ scp -P <port> root@<ip>:~/solafune/solafune-precipitation/submission.zip ~/Deskt
 
 每次只改一件事，submit 前確認 local val RMSE 有改善。
 
-### P2-1. Weighted MSE loss（改 3 行）
+### [DONE - v4] P2-0. ImageNet 預訓練權重（1 行改動）
 ```python
-rain_weight = 1.0 + 5.0 * (target > 0).float()
-loss = (rain_weight * (pred_log - target_log)**2).mean()
+# model.py
+encoder_weights="imagenet"  # 原本是 None
+```
+- 從零訓練 -> 用 ImageNet 初始化，通常單項最大提升
+- 比賽規則允許（Apache 2.0）
+
+### [DONE - v4] P2-1. Weighted MSE loss
+```python
+weight = 1.0 + 5.0 * (target > 0).float()
+loss = (weight * (pred - target) ** 2).mean()
 ```
 - 解決 80.33% 零值主導 loss 的問題
 - alpha=5 是起點，可試 3 / 8 / 10
@@ -111,7 +106,7 @@ ema_model = AveragedModel(model, multi_avg_fn=get_ema_multi_avg_fn(0.999))
 
 ---
 
-## Phase 3：最重要的單項改進（2 天）
+## Phase 3：最重要的單項改進（2 天，P2-0+P2-1 確認有效後）
 
 ### P3-1. Day + Hour Positional Encoding
 - `train_dataset.csv` 有 `datetime` 欄位（已確認）
