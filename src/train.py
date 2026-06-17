@@ -169,8 +169,8 @@ def train(args):
 
     # 4. Optimizer + Scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        optimizer, mode="min", factor=0.5, patience=3, min_lr=args.lr * 0.01
     )
     criterion = CombinedLoss(mse_weight=0.7)
 
@@ -198,7 +198,6 @@ def train(args):
             scaler.update()
             train_loss += loss.item()
             train_bar.set_postfix(loss=f"{loss.item():.4f}")
-        scheduler.step()
 
         # --- Validate ---
         model.eval()
@@ -212,12 +211,13 @@ def train(args):
                 # expm1 還原到原始降水空間再計算 RMSE
                 # clamp max=8: expm1(8)~2981 mm/hr, 防止未收斂模型數值溢位
                 preds_real   = torch.expm1(preds.float().clamp(0, 8))
-                targets_real = torch.expm1(targets.float())
+                targets_real = torch.expm1(targets.float().clamp(0, 8))
                 sq = (preds_real - targets_real) ** 2
                 sq_errors.append(sq[torch.isfinite(sq)].cpu().numpy().ravel())
 
         val_rmse = float(np.sqrt(np.concatenate(sq_errors).mean()))
         avg_train = train_loss / len(train_loader)
+        scheduler.step(val_rmse)
         print(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f}")
 
         if val_rmse < best_val_rmse:

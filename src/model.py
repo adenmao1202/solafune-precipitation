@@ -20,6 +20,12 @@ def build_model(encoder_name: str = "efficientnet-b4",
         encoder_weights=encoder_weights,
         in_channels=IN_CHANNELS,
         classes=1,
-        activation=None,       # 輸出原始值，loss 函數裡再處理
+        activation=None,
+        decoder_use_batchnorm=True,
+        decoder_attention_type=None,
     )
+    # 在 decoder 的每個 block 加 dropout 0.2，對抗 overfitting
+    for block in model.decoder.blocks:
+        block.conv1 = nn.Sequential(block.conv1, nn.Dropout2d(p=0.2))
+
     return model
