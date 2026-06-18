@@ -291,7 +291,7 @@ if __name__ == "__main__":
                         help="Resize all satellite inputs to (N×N). Required to batch mixed satellites.")
     parser.add_argument("--stats_max_samples", type=int, default=0,
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
-    parser.add_argument("--early_stop_patience", type=int, default=7,
+    parser.add_argument("--early_stop_patience", type=int, default=15,
                         help="Stop training if val RMSE does not improve for this many epochs.")
     parser.add_argument("--loss_type", default="combined",
                         help="Loss function identifier for logging (e.g. combined, weighted_mse, tiered).")
