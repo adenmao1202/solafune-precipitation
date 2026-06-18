@@ -288,7 +288,7 @@ if __name__ == "__main__":
                         help="Resize all satellite inputs to (N×N). Required to batch mixed satellites.")
     parser.add_argument("--stats_max_samples", type=int, default=0,
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
-    parser.add_argument("--early_stop_patience", type=int, default=10,
+    parser.add_argument("--early_stop_patience", type=int, default=7,
                         help="Stop training if val RMSE does not improve for this many epochs.")
     parser.add_argument("--run_name", default=datetime.now().strftime("%Y%m%d_%H%M"),
                         help="Experiment name. Output saved to runs/{run_name}/")
