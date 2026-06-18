@@ -7,6 +7,7 @@ Week 1 Baseline 訓練腳本。
 import argparse
 import csv
 import json
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -79,16 +80,64 @@ def compute_stats(csv_path: Path, data_dir: Path, out_path: Path, max_samples: i
 
 
 # ---------------------------------------------------------------------------
-# 損失函數：Weighted MSE，有雨 pixel 權重 6x，解決 80% 零值主導梯度的問題
+# 損失函數：Tiered Weighted MSE+MAE
+# 根據降水強度分層加權，專門強化暴雨區域的學習：
+#   dry pixel (target=0):          weight = 1
+#   light rain (>0 mm/hr):         weight = 3   (+2)
+#   heavy rain (>7.4 mm/hr, 99th): weight = 6   (+3)
+#   extreme    (>18 mm/hr, 99.9th):weight = 11  (+5)
+# 閾值對應 log1p 空間：log1p(7.4)=2.12, log1p(18.1)=2.94
 # ---------------------------------------------------------------------------
-class WeightedMSELoss(nn.Module):
-    def __init__(self, rain_weight: float = 5.0):
-        super().__init__()
-        self.rain_weight = rain_weight
-
+class TieredWeightedLoss(nn.Module):
     def forward(self, pred, target):
-        weight = 1.0 + self.rain_weight * (target > 0).float()
-        return (weight * (pred - target) ** 2).mean()
+        weight = torch.ones_like(target)
+        weight = weight + 2.0 * (target > 0).float()
+        weight = weight + 3.0 * (target > 2.12).float()
+        weight = weight + 5.0 * (target > 2.94).float()
+        mse = (weight * (pred - target) ** 2).mean()
+        mae = (weight * (pred - target).abs()).mean()
+        return 0.7 * mse + 0.3 * mae
+
+
+# ---------------------------------------------------------------------------
+# 分層取樣：掃描 GPM 檔案標記有雨/無雨，讓訓練集有雨:無雨 = 50:50
+# val set 不動，保留全樣本以得到無偏的 RMSE 估計
+# ---------------------------------------------------------------------------
+def scan_rain_labels(csv_path: Path, data_dir: Path, cache_path: Path) -> dict:
+    """回傳 {row_index: True/False}，True 代表該樣本 GPM 有非零降水。結果快取到 cache_path。"""
+    import rasterio
+    from tqdm import tqdm
+
+    if cache_path.exists():
+        df_cache = pd.read_csv(cache_path)
+        return dict(zip(df_cache["idx"].tolist(), df_cache["has_rain"].astype(bool).tolist()))
+
+    df = pd.read_csv(csv_path)
+    results = {}
+    for idx, row in tqdm(df.iterrows(), total=len(df), desc="Scanning GPM labels"):
+        gpm_path = Path(data_dir) / "gpm_imerg" / row["gpm_imerg_filename"]
+        try:
+            with rasterio.open(gpm_path) as src:
+                results[idx] = bool(src.read(1).max() > 0)
+        except Exception:
+            results[idx] = False
+
+    pd.DataFrame({"idx": list(results.keys()), "has_rain": list(results.values())}).to_csv(cache_path, index=False)
+    print(f"Rain labels cached -> {cache_path}")
+    return results
+
+
+def stratified_sample(train_idx: list, rain_labels: dict, seed: int = 42) -> list:
+    """有雨樣本全保留，無雨樣本隨機抽取到與有雨數量相同（50:50）。"""
+    rainy = [i for i in train_idx if rain_labels.get(i, False)]
+    dry   = [i for i in train_idx if not rain_labels.get(i, False)]
+    rng = random.Random(seed)
+    dry_sampled = rng.sample(dry, min(len(rainy), len(dry)))
+    combined = rainy + dry_sampled
+    rng.shuffle(combined)
+    print(f"Stratified train: {len(rainy)} rainy + {len(dry_sampled)} dry "
+          f"= {len(combined)} total (original dry: {len(dry)})")
+    return combined
 
 
 # ---------------------------------------------------------------------------
@@ -150,9 +199,15 @@ def train(args):
         input_size=input_size,
     )
     train_idx, val_idx = temporal_split(Path(args.csv_train), val_ratio=0.2)
+
+    # 分層取樣：掃描 GPM 標籤（首次跑約 5-10 分鐘，之後快取直接讀）
+    rain_cache = Path(args.data_dir) / "rain_labels.csv"
+    rain_labels = scan_rain_labels(Path(args.csv_train), Path(args.data_dir), rain_cache)
+    train_idx = stratified_sample(train_idx, rain_labels)
+
     train_ds = Subset(full_ds, train_idx)
     val_ds   = Subset(full_ds, val_idx)
-    print(f"Temporal split: {len(train_ds)} train / {len(val_ds)} val samples")
+    print(f"Train: {len(train_ds)} (stratified 50:50) / Val: {len(val_ds)} (full temporal)")
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -170,7 +225,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=args.lr * 0.01
     )
-    criterion = WeightedMSELoss(rain_weight=5.0)
+    criterion = TieredWeightedLoss()
 
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")
