@@ -80,23 +80,14 @@ def compute_stats(csv_path: Path, data_dir: Path, out_path: Path, max_samples: i
 
 
 # ---------------------------------------------------------------------------
-# 損失函數：Tiered Weighted MSE+MAE
-# 根據降水強度分層加權，專門強化暴雨區域的學習：
-#   dry pixel (target=0):          weight = 1
-#   light rain (>0 mm/hr):         weight = 3   (+2)
-#   heavy rain (>7.4 mm/hr, 99th): weight = 6   (+3)
-#   extreme    (>18 mm/hr, 99.9th):weight = 11  (+5)
-# 閾值對應 log1p 空間：log1p(7.4)=2.12, log1p(18.1)=2.94
+# 損失函數：CombinedLoss（v3 baseline，所有 pixel 同等權重）
+# v4/v6 的加權 loss 實驗均比 v3 差：零值過度修正讓 val RMSE 上升
+# 結論：log1p 已足夠壓縮右偏分布，加權 loss 不是目前 LB 瓶頸
 # ---------------------------------------------------------------------------
-class TieredWeightedLoss(nn.Module):
+class CombinedLoss(nn.Module):
     def forward(self, pred, target):
-        weight = torch.ones_like(target)
-        weight = weight + 2.0 * (target > 0).float()
-        weight = weight + 3.0 * (target > 2.12).float()
-        # 暴雨層（>18mm/hr, weight=11）移除：
-        # 極端 pixel 過少，gradient spike 造成 val 震盪（同 v4 alpha=5 問題）
-        mse = (weight * (pred - target) ** 2).mean()
-        mae = (weight * (pred - target).abs()).mean()
+        mse = ((pred - target) ** 2).mean()
+        mae = (pred - target).abs().mean()
         return 0.7 * mse + 0.3 * mae
 
 
@@ -200,15 +191,9 @@ def train(args):
         input_size=input_size,
     )
     train_idx, val_idx = temporal_split(Path(args.csv_train), val_ratio=0.2)
-
-    # 分層取樣：掃描 GPM 標籤（首次跑約 5-10 分鐘，之後快取直接讀）
-    rain_cache = Path(args.data_dir) / "rain_labels.csv"
-    rain_labels = scan_rain_labels(Path(args.csv_train), Path(args.data_dir), rain_cache)
-    train_idx = stratified_sample(train_idx, rain_labels)
-
     train_ds = Subset(full_ds, train_idx)
     val_ds   = Subset(full_ds, val_idx)
-    print(f"Train: {len(train_ds)} (stratified 50:50) / Val: {len(val_ds)} (full temporal)")
+    print(f"Temporal split: {len(train_ds)} train / {len(val_ds)} val")
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -226,7 +211,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=args.lr * 0.01
     )
-    criterion = TieredWeightedLoss()
+    criterion = CombinedLoss()
 
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")
