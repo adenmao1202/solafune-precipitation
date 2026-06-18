@@ -225,11 +225,12 @@ def train(args):
         model.train()
         train_loss = 0.0
         train_bar = tqdm(train_loader, desc=f"Epoch {epoch:03d} [train]", leave=False)
-        for inputs, targets, _ in train_bar:
+        for inputs, targets, _, time_feat in train_bar:
             inputs, targets = inputs.to(device), targets.to(device)
+            time_feat = time_feat.to(device)
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                preds = model(inputs)
+                preds = model(inputs, time_feat)
                 loss  = criterion(preds, targets)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -244,10 +245,11 @@ def train(args):
         sq_errors = []
         with torch.no_grad():
             val_bar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [val]  ", leave=False)
-            for inputs, targets, _ in val_bar:
+            for inputs, targets, _, time_feat in val_bar:
                 inputs, targets = inputs.to(device), targets.to(device)
+                time_feat = time_feat.to(device)
                 with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
-                    preds = model(inputs)
+                    preds = model(inputs, time_feat)
                 # expm1 還原到原始降水空間再計算 RMSE
                 # clamp max=8: expm1(8)~2981 mm/hr, 防止未收斂模型數值溢位
                 preds_real   = torch.expm1(preds.float().clamp(0, 8))

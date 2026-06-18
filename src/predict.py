@@ -59,10 +59,11 @@ def predict(args):
 
     from tqdm import tqdm
     with torch.no_grad():
-        for inputs, _, unique_ids in tqdm(loader, desc="Predicting"):
-            inputs = inputs.to(device)
+        for inputs, _, unique_ids, time_feat in tqdm(loader, desc="Predicting"):
+            inputs    = inputs.to(device)
+            time_feat = time_feat.to(device)
             # preds: (B, 1, sat_H, sat_W) — satellite native resolution
-            preds = model(inputs)
+            preds = model(inputs, time_feat)
             # Resize to GPM_SIZE (41×41) for submission
             preds = F.interpolate(
                 preds, size=GPM_SIZE, mode="bilinear", align_corners=False

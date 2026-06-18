@@ -1,4 +1,5 @@
 import ast
+import math
 
 import numpy as np
 import pandas as pd
@@ -153,4 +154,14 @@ class PrecipDataset(Dataset):
         if self.transform:
             input_tensor, target_tensor = self.transform(input_tensor, target_tensor)
 
-        return input_tensor, target_tensor, row["unique_id"]
+        dt   = pd.to_datetime(row["datetime"])
+        day  = dt.day_of_year
+        hour = dt.hour
+        time_feat = torch.tensor([
+            math.sin(2 * math.pi * day / 365),
+            math.cos(2 * math.pi * day / 365),
+            math.sin(2 * math.pi * hour / 24),
+            math.cos(2 * math.pi * hour / 24),
+        ], dtype=torch.float32)
+
+        return input_tensor, target_tensor, row["unique_id"], time_feat
