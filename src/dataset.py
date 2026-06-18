@@ -122,6 +122,8 @@ class PrecipDataset(Dataset):
                         t = F.interpolate(t.unsqueeze(0), size=(sat_h, sat_w),
                                           mode='bilinear', align_corners=False).squeeze(0)
                         arr = t.numpy()
+                    if satellite == "meteosat":
+                        arr[[12, 13]] = arr[[13, 12]]
                     arr = normalize_per_band(arr, self.stats, satellite)
                     frames.append(arr)
                     masks.append(np.ones((1, sat_h, sat_w), dtype=np.float32))
