@@ -138,7 +138,7 @@ def stratified_sample(train_idx: list, rain_labels: dict, seed: int = 42) -> lis
 def save_experiment(args, best_val_rmse: float, epochs_run: int):
     log_path = Path("experiments.csv")
     fieldnames = ["run_name", "datetime", "epochs_run", "best_val_rmse",
-                  "lr", "batch_size", "encoder", "lb_score", "notes"]
+                  "lr", "batch_size", "encoder", "loss_type", "lb_score", "notes"]
     row = {
         "run_name":       args.run_name,
         "datetime":       datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -147,6 +147,7 @@ def save_experiment(args, best_val_rmse: float, epochs_run: int):
         "lr":             args.lr,
         "batch_size":     args.batch_size,
         "encoder":        args.encoder,
+        "loss_type":      args.loss_type,
         "lb_score":       "",
         "notes":          "",
     }
@@ -211,7 +212,7 @@ def train(args):
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode="min", factor=0.5, patience=3, min_lr=args.lr * 0.01
     )
-    criterion = CombinedLoss()
+    criterion = CombinedLoss()  # args.loss_type logged; extend here if adding new losses
 
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")
@@ -290,6 +291,8 @@ if __name__ == "__main__":
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
     parser.add_argument("--early_stop_patience", type=int, default=7,
                         help="Stop training if val RMSE does not improve for this many epochs.")
+    parser.add_argument("--loss_type", default="combined",
+                        help="Loss function identifier for logging (e.g. combined, weighted_mse, tiered).")
     parser.add_argument("--run_name", default=datetime.now().strftime("%Y%m%d_%H%M"),
                         help="Experiment name. Output saved to runs/{run_name}/")
     args = parser.parse_args()
