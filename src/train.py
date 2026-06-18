@@ -88,7 +88,7 @@ class CombinedLoss(nn.Module):
     def forward(self, pred, target):
         mse = ((pred - target) ** 2).mean()
         mae = (pred - target).abs().mean()
-        return 0.7 * mse + 0.3 * mae
+        return 0.3 * mse + 0.7 * mae
 
 
 # ---------------------------------------------------------------------------

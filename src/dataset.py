@@ -34,7 +34,7 @@ GPM_SIZE = (41, 41)
 
 MAX_FRAMES  = 3
 N_BANDS     = 16
-IN_CHANNELS = MAX_FRAMES * N_BANDS + MAX_FRAMES  # 51
+IN_CHANNELS = MAX_FRAMES * N_BANDS + MAX_FRAMES + MAX_FRAMES  # 54 = 48 bands + 3 masks + 3 BTD
 
 
 def get_device() -> torch.device:
@@ -105,7 +105,7 @@ class PrecipDataset(Dataset):
         sat_h, sat_w = SAT_SIZE[satellite]
         out_h, out_w  = self.input_size if self.input_size else (sat_h, sat_w)
 
-        frames, masks = [], []
+        frames, masks, btd_channels = [], [], []
         for i in range(MAX_FRAMES):
             if i < len(filenames):
                 arr = read_tif(self._sat_path(satellite, filenames[i]))
@@ -124,6 +124,13 @@ class PrecipDataset(Dataset):
                         arr = t.numpy()
                     if satellite == "meteosat":
                         arr[[12, 13]] = arr[[13, 12]]
+                    # BTD (Split Window): index 12 (~10.4-10.5um) minus index 14 (~12.0-12.4um)
+                    # Computed on raw values before normalization; normalized with derived stats.
+                    btd_mean = self.stats[satellite]["mean"][12] - self.stats[satellite]["mean"][14]
+                    btd_std  = float(np.sqrt(self.stats[satellite]["std"][12] ** 2
+                                             + self.stats[satellite]["std"][14] ** 2))
+                    btd = (arr[12] - arr[14] - btd_mean) / (btd_std + 1e-6)
+                    btd_channels.append(btd[None])  # (1, H, W)
                     arr = normalize_per_band(arr, self.stats, satellite)
                     frames.append(arr)
                     masks.append(np.ones((1, sat_h, sat_w), dtype=np.float32))
@@ -131,11 +138,13 @@ class PrecipDataset(Dataset):
                     # Corrupt file: treat as missing frame
                     frames.append(np.zeros((N_BANDS, sat_h, sat_w), dtype=np.float32))
                     masks.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
+                    btd_channels.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
             else:
                 frames.append(np.zeros((N_BANDS, sat_h, sat_w), dtype=np.float32))
                 masks.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
+                btd_channels.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
 
-        input_tensor = torch.from_numpy(np.concatenate(frames + masks, axis=0))
+        input_tensor = torch.from_numpy(np.concatenate(frames + masks + btd_channels, axis=0))
         # shape: (IN_CHANNELS, sat_h, sat_w)
 
         # Resize to target output size if specified (needed to batch mixed satellites)
