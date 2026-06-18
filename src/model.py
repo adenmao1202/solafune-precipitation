@@ -38,7 +38,7 @@ class PrecipUNet(smp.Unet):
 
 
 def build_model(encoder_name: str = "efficientnet-b4",
-                encoder_weights=None) -> nn.Module:
+                encoder_weights: str = "imagenet") -> nn.Module:
     """
     UNet with EfficientNet-B4 encoder + FiLM time conditioning.
 
@@ -46,7 +46,8 @@ def build_model(encoder_name: str = "efficientnet-b4",
     allowing the model to learn seasonal and diurnal precipitation patterns.
     Based on NPM paper ablation: day encoding alone = +17% CSI.
 
-    encoder_weights=None: train from scratch (all domain papers do this).
+    encoder_weights="imagenet": front 3ch get ImageNet prior (VIS/NIR channels).
+    v7 showed Kaiming reinit is worse than partial ImageNet for our 51ch input.
     """
     model = PrecipUNet(
         time_dim=4,
@@ -58,19 +59,5 @@ def build_model(encoder_name: str = "efficientnet-b4",
         decoder_use_batchnorm=True,
         decoder_attention_type=None,
     )
-
-    if encoder_weights is None:
-        for m in model.encoder.modules():
-            if isinstance(m, nn.Conv2d):
-                nn.init.kaiming_normal_(m.weight, mode='fan_out', nonlinearity='relu')
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
-            elif isinstance(m, (nn.BatchNorm2d, nn.GroupNorm)):
-                nn.init.ones_(m.weight)
-                nn.init.zeros_(m.bias)
-            elif isinstance(m, nn.Linear):
-                nn.init.trunc_normal_(m.weight, std=0.02)
-                if m.bias is not None:
-                    nn.init.zeros_(m.bias)
 
     return model
