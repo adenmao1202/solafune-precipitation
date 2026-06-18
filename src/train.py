@@ -93,7 +93,8 @@ class TieredWeightedLoss(nn.Module):
         weight = torch.ones_like(target)
         weight = weight + 2.0 * (target > 0).float()
         weight = weight + 3.0 * (target > 2.12).float()
-        weight = weight + 5.0 * (target > 2.94).float()
+        # 暴雨層（>18mm/hr, weight=11）移除：
+        # 極端 pixel 過少，gradient spike 造成 val 震盪（同 v4 alpha=5 問題）
         mse = (weight * (pred - target) ** 2).mean()
         mae = (weight * (pred - target).abs()).mean()
         return 0.7 * mse + 0.3 * mae
