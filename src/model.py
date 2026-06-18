@@ -31,7 +31,7 @@ class PrecipUNet(smp.Unet):
             block.conv1 = nn.Sequential(block.conv1, nn.Dropout2d(p=0.2))
 
     def forward(self, x: torch.Tensor, time_feat: torch.Tensor) -> torch.Tensor:
-        features = self.encoder(x)
+        features = list(self.encoder(x))
         features[-1] = self.film(features[-1], time_feat)
         decoder_output = self.decoder(*features)
         return self.segmentation_head(decoder_output)
