@@ -94,24 +94,26 @@ BIN_CENTERS_FIXED = [0.0, 0.15, 0.3, 0.6, 1.2, 2.4, 4.8, 9.6, 19.2]  # last adde
 class FocalLossIMERG(nn.Module):
     def __init__(self, bin_edges: list, alpha: list, gamma: float = 2.0):
         super().__init__()
-        # edges[1:] used for bucketize (exclude leading 0)
-        self.register_buffer("edges", torch.tensor(bin_edges[1:], dtype=torch.float32))
-        self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+        self.edges_list = bin_edges[1:]  # exclude leading 0
+        self.alpha_list = alpha
         self.gamma = gamma
 
     def forward(self, logits: torch.Tensor, targets_log1p: torch.Tensor) -> torch.Tensor:
         """logits: (B, NUM_BINS, H, W); targets_log1p: (B, 1, H, W) in log1p(mm/hr)"""
+        device = logits.device
+        edges = torch.tensor(self.edges_list, dtype=torch.float32, device=device)
+        alpha_t = torch.tensor(self.alpha_list, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
+
         targets_mm = torch.expm1(targets_log1p.float().clamp(0, 8)).squeeze(1)  # (B, H, W)
         B, H, W = targets_mm.shape
 
-        targets_bin = torch.bucketize(targets_mm.reshape(-1), self.edges.to(targets_mm.device)).clamp(0, NUM_BINS - 1).view(B, H, W)
+        targets_bin = torch.bucketize(targets_mm.reshape(-1), edges).clamp(0, NUM_BINS - 1).view(B, H, W)
         targets_onehot = F.one_hot(targets_bin, num_classes=NUM_BINS).permute(0, 3, 1, 2).float()
 
         probs = F.softmax(logits, dim=1)
         log_probs = torch.log(probs + 1e-8)
         focal_weight = (1.0 - probs) ** self.gamma
 
-        alpha_t = self.alpha.to(logits.device).view(1, NUM_BINS, 1, 1)
         loss = -alpha_t * focal_weight * targets_onehot * log_probs
         return loss.sum(dim=1).mean()
 
