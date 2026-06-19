@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 from dataset import PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR
@@ -80,15 +81,110 @@ def compute_stats(csv_path: Path, data_dir: Path, out_path: Path, max_samples: i
 
 
 # ---------------------------------------------------------------------------
-# 損失函數：CombinedLoss（v3 baseline，所有 pixel 同等權重）
-# v4/v6 的加權 loss 實驗均比 v3 差：零值過度修正讓 val RMSE 上升
-# 結論：log1p 已足夠壓縮右偏分布，加權 loss 不是目前 LB 瓶頸
+# Focal Loss for IMERG precipitation bins (GENESIS 10 log-spaced bins)
+# v8a regression (0.7*MSE+0.3*MAE) confirmed ceiling; classification framework
+# needed to break through 80% zero-pixel gradient dominance.
 # ---------------------------------------------------------------------------
+NUM_BINS = 10
+# Fixed edges [0..25.6]; max_val (99.9th percentile) appended at runtime
+BIN_EDGES_FIXED = [0.0, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6]
+BIN_CENTERS_FIXED = [0.0, 0.15, 0.3, 0.6, 1.2, 2.4, 4.8, 9.6, 19.2]  # last added at runtime
+
+
+class FocalLossIMERG(nn.Module):
+    def __init__(self, bin_edges: list, alpha: list, gamma: float = 2.0):
+        super().__init__()
+        # edges[1:] used for bucketize (exclude leading 0)
+        self.register_buffer("edges", torch.tensor(bin_edges[1:], dtype=torch.float32))
+        self.register_buffer("alpha", torch.tensor(alpha, dtype=torch.float32))
+        self.gamma = gamma
+
+    def forward(self, logits: torch.Tensor, targets_log1p: torch.Tensor) -> torch.Tensor:
+        """logits: (B, NUM_BINS, H, W); targets_log1p: (B, 1, H, W) in log1p(mm/hr)"""
+        targets_mm = torch.expm1(targets_log1p.float().clamp(0, 8)).squeeze(1)  # (B, H, W)
+        B, H, W = targets_mm.shape
+
+        targets_bin = torch.bucketize(targets_mm.reshape(-1), self.edges).clamp(0, NUM_BINS - 1).view(B, H, W)
+        targets_onehot = F.one_hot(targets_bin, num_classes=NUM_BINS).permute(0, 3, 1, 2).float()
+
+        probs = F.softmax(logits, dim=1)
+        log_probs = torch.log(probs + 1e-8)
+        focal_weight = (1.0 - probs) ** self.gamma
+
+        alpha_t = self.alpha.view(1, NUM_BINS, 1, 1)
+        loss = -alpha_t * focal_weight * targets_onehot * log_probs
+        return loss.sum(dim=1).mean()
+
+
+# Regression fallback — kept for --loss_type=combined experiments
 class CombinedLoss(nn.Module):
     def forward(self, pred, target):
         mse = ((pred - target) ** 2).mean()
         mae = (pred - target).abs().mean()
-        return 0.3 * mse + 0.7 * mae
+        return 0.7 * mse + 0.3 * mae  # v8a setting
+
+
+# ---------------------------------------------------------------------------
+# EMA (Exponential Moving Average) — manual implementation, no extra deps.
+# Validation and checkpoint both use EMA weights.
+# ---------------------------------------------------------------------------
+class EMA:
+    def __init__(self, model: nn.Module, decay: float = 0.999):
+        self.decay = decay
+        self.shadow = {k: v.clone().detach() for k, v in model.named_parameters()}
+
+    def update(self, model: nn.Module):
+        for name, param in model.named_parameters():
+            self.shadow[name].mul_(self.decay).add_(param.detach(), alpha=1.0 - self.decay)
+
+    def apply(self, model: nn.Module):
+        self._backup = {k: v.clone().detach() for k, v in model.named_parameters()}
+        for name, param in model.named_parameters():
+            param.data.copy_(self.shadow[name])
+
+    def restore(self, model: nn.Module):
+        for name, param in model.named_parameters():
+            param.data.copy_(self._backup[name])
+
+    def state_dict(self):
+        return {k: v.cpu() for k, v in self.shadow.items()}
+
+    def load_state_dict(self, state: dict):
+        self.shadow = {k: v.clone() for k, v in state.items()}
+
+
+# ---------------------------------------------------------------------------
+# Compute inverse-frequency alpha for Focal Loss bins.
+# Scans all training GPM files once; results are printed for verification.
+# ---------------------------------------------------------------------------
+def compute_bin_alpha(train_idx: list, full_ds, bin_edges_fixed: list):
+    """Returns (alpha list of NUM_BINS floats, max_val float)."""
+    import rasterio
+    from tqdm import tqdm
+
+    edges_arr = np.array(bin_edges_fixed[1:], dtype=np.float32)  # for searchsorted
+    freq = np.zeros(NUM_BINS, dtype=np.float64)
+    max_val = 0.0
+
+    for idx in tqdm(train_idx, desc="Scanning bins", leave=False):
+        row = full_ds.df.iloc[idx]
+        gpm_path = full_ds.data_dir / "gpm_imerg" / row["gpm_imerg_filename"]
+        try:
+            with rasterio.open(gpm_path) as src:
+                arr = src.read(1).astype(np.float32)
+            max_val = max(max_val, float(arr.max()))
+            bin_idx = np.searchsorted(edges_arr, arr.ravel()).clip(0, NUM_BINS - 1)
+            np.add.at(freq, bin_idx, 1)
+        except Exception:
+            pass
+
+    freq_norm = freq / (freq.sum() + 1e-8)
+    alpha = 1.0 / (freq_norm + 1e-6)
+    alpha = (alpha / alpha.sum()).tolist()
+    print(f"Bin alpha: {[f'{a:.4f}' for a in alpha]}")
+    print(f"Bin freq%: {[f'{f*100:.2f}' for f in freq_norm]}")
+    print(f"max_val (training GPM): {max_val:.2f} mm/hr")
+    return alpha, max_val
 
 
 # ---------------------------------------------------------------------------
@@ -202,17 +298,32 @@ def train(args):
     val_loader   = DataLoader(val_ds,   batch_size=args.batch_size,
                               shuffle=False, num_workers=args.num_workers, pin_memory=pin)
 
-    # 3. Model
+    # 3. Model + Loss
+    use_focal = (args.loss_type == "focal")
+    num_classes = NUM_BINS if use_focal else 1
     print("Building model...")
-    model = build_model(encoder_name=args.encoder).to(device)
+    model = build_model(encoder_name=args.encoder, num_classes=num_classes).to(device)
     print("Model ready.")
 
-    # 4. Optimizer + Scheduler
+    if use_focal:
+        print("Computing Focal Loss bin frequencies...")
+        alpha, max_val = compute_bin_alpha(train_idx, full_ds, BIN_EDGES_FIXED)
+        bin_edges   = BIN_EDGES_FIXED + [max(max_val, 26.0)]
+        bin_centers = BIN_CENTERS_FIXED + [(25.6 + bin_edges[-1]) / 2]
+        criterion   = FocalLossIMERG(bin_edges=bin_edges, alpha=alpha, gamma=args.gamma)
+        bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
+    else:
+        criterion    = CombinedLoss()
+        bin_center_t = None
+
+    # 4. Optimizer + Scheduler (CosineAnnealingWarmRestarts)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=0.5, patience=3, min_lr=args.lr * 0.01
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+        optimizer, T_0=20, T_mult=2, eta_min=1e-7
     )
-    criterion = CombinedLoss()  # args.loss_type logged; extend here if adding new losses
+
+    # 5. EMA
+    ema = EMA(model, decay=args.ema_decay)
 
     scaler = torch.amp.GradScaler("cuda", enabled=(device.type == "cuda"))
     best_val_rmse = float("inf")
@@ -237,10 +348,12 @@ def train(args):
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
+            ema.update(model)
             train_loss += loss.item()
             train_bar.set_postfix(loss=f"{loss.item():.4f}")
 
-        # --- Validate ---
+        # --- Validate (using EMA weights) ---
+        ema.apply(model)
         model.eval()
         sq_errors = []
         with torch.no_grad():
@@ -250,22 +363,28 @@ def train(args):
                 time_feat = time_feat.to(device)
                 with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                     preds = model(inputs, time_feat)
-                # expm1 還原到原始降水空間再計算 RMSE
-                # clamp max=8: expm1(8)~2981 mm/hr, 防止未收斂模型數值溢位
-                preds_real   = torch.expm1(preds.float().clamp(0, 8))
                 targets_real = torch.expm1(targets.float().clamp(0, 8))
-                sq = (preds_real - targets_real) ** 2
+                if use_focal:
+                    probs    = F.softmax(preds.float(), dim=1)
+                    pred_mm  = (probs * bin_center_t).sum(dim=1, keepdim=True)
+                else:
+                    pred_mm = torch.expm1(preds.float().clamp(0, 8))
+                sq = (pred_mm - targets_real) ** 2
                 sq_errors.append(sq[torch.isfinite(sq)].cpu().numpy().ravel())
+        ema.restore(model)
 
         val_rmse = float(np.sqrt(np.concatenate(sq_errors).mean()))
         avg_train = train_loss / len(train_loader)
-        scheduler.step(val_rmse)
-        print(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f}")
+        scheduler.step()
+        print(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f} | lr={scheduler.get_last_lr()[0]:.2e}")
 
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
             patience_counter = 0
+            # Save EMA weights directly so best_model.pth is ready for inference
+            ema.apply(model)
             torch.save(model.state_dict(), run_dir / "best_model.pth")
+            ema.restore(model)
             print(f"  -> Saved best model (RMSE={best_val_rmse:.4f})")
         else:
             patience_counter += 1
@@ -291,10 +410,14 @@ if __name__ == "__main__":
                         help="Resize all satellite inputs to (N×N). Required to batch mixed satellites.")
     parser.add_argument("--stats_max_samples", type=int, default=0,
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
-    parser.add_argument("--early_stop_patience", type=int, default=15,
+    parser.add_argument("--early_stop_patience", type=int, default=30,
                         help="Stop training if val RMSE does not improve for this many epochs.")
-    parser.add_argument("--loss_type", default="combined",
-                        help="Loss function identifier for logging (e.g. combined, weighted_mse, tiered).")
+    parser.add_argument("--loss_type", default="focal",
+                        help="focal: FocalLossIMERG (10 log-bins); combined: 0.7*MSE+0.3*MAE regression.")
+    parser.add_argument("--gamma", type=float, default=2.0,
+                        help="Focal Loss gamma (focusing parameter). Default 2.0 per GENESIS.")
+    parser.add_argument("--ema_decay", type=float, default=0.999,
+                        help="EMA decay factor. Default 0.999.")
     parser.add_argument("--run_name", default=datetime.now().strftime("%Y%m%d_%H%M"),
                         help="Experiment name. Output saved to runs/{run_name}/")
     args = parser.parse_args()

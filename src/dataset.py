@@ -1,5 +1,6 @@
 import ast
 import math
+import random
 
 import numpy as np
 import pandas as pd
@@ -155,6 +156,14 @@ class PrecipDataset(Dataset):
 
         if self.transform:
             input_tensor, target_tensor = self.transform(input_tensor, target_tensor)
+
+        if self.is_train:
+            if random.random() < 0.5:
+                input_tensor  = torch.flip(input_tensor,  dims=[-1])
+                target_tensor = torch.flip(target_tensor, dims=[-1])
+            if random.random() < 0.5:
+                input_tensor  = torch.flip(input_tensor,  dims=[-2])
+                target_tensor = torch.flip(target_tensor, dims=[-2])
 
         dt   = pd.to_datetime(row["datetime"])
         day  = dt.day_of_year

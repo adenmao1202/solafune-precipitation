@@ -38,7 +38,8 @@ class PrecipUNet(smp.Unet):
 
 
 def build_model(encoder_name: str = "efficientnet-b4",
-                encoder_weights: str = "imagenet") -> nn.Module:
+                encoder_weights: str = "imagenet",
+                num_classes: int = 1) -> nn.Module:
     """
     UNet with EfficientNet-B4 encoder + FiLM time conditioning.
 
@@ -54,7 +55,7 @@ def build_model(encoder_name: str = "efficientnet-b4",
         encoder_name=encoder_name,
         encoder_weights=encoder_weights,
         in_channels=IN_CHANNELS,
-        classes=1,
+        classes=num_classes,
         activation=None,
         decoder_use_batchnorm=True,
         decoder_attention_type=None,
