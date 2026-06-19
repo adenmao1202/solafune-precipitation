@@ -111,7 +111,7 @@ class FocalLossIMERG(nn.Module):
         log_probs = torch.log(probs + 1e-8)
         focal_weight = (1.0 - probs) ** self.gamma
 
-        alpha_t = self.alpha.view(1, NUM_BINS, 1, 1)
+        alpha_t = self.alpha.to(logits.device).view(1, NUM_BINS, 1, 1)
         loss = -alpha_t * focal_weight * targets_onehot * log_probs
         return loss.sum(dim=1).mean()
 
