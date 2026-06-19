@@ -104,7 +104,7 @@ class FocalLossIMERG(nn.Module):
         targets_mm = torch.expm1(targets_log1p.float().clamp(0, 8)).squeeze(1)  # (B, H, W)
         B, H, W = targets_mm.shape
 
-        targets_bin = torch.bucketize(targets_mm.reshape(-1), self.edges).clamp(0, NUM_BINS - 1).view(B, H, W)
+        targets_bin = torch.bucketize(targets_mm.reshape(-1), self.edges.to(targets_mm.device)).clamp(0, NUM_BINS - 1).view(B, H, W)
         targets_onehot = F.one_hot(targets_bin, num_classes=NUM_BINS).permute(0, 3, 1, 2).float()
 
         probs = F.softmax(logits, dim=1)
@@ -312,6 +312,9 @@ def train(args):
         bin_centers = BIN_CENTERS_FIXED + [(25.6 + bin_edges[-1]) / 2]
         criterion   = FocalLossIMERG(bin_edges=bin_edges, alpha=alpha, gamma=args.gamma)
         bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
+        with open(run_dir / "focal_config.json", "w") as f:
+            json.dump({"max_val": float(bin_edges[-1]), "bin_edges": bin_edges,
+                       "bin_centers": bin_centers, "alpha": alpha, "gamma": args.gamma}, f, indent=2)
     else:
         criterion    = CombinedLoss()
         bin_center_t = None
