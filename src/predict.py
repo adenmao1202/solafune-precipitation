@@ -19,6 +19,7 @@ from torch.utils.data import DataLoader
 
 from dataset import PrecipDataset, get_device, GPM_SIZE
 from model import build_model
+from train import NUM_BINS, BIN_EDGES_FIXED, BIN_CENTERS_FIXED
 
 
 def predict(args):
@@ -37,9 +38,17 @@ def predict(args):
     )
     loader = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=4)
 
-    model = build_model()
+    use_focal = (args.loss_type == "focal")
+    num_classes = NUM_BINS if use_focal else 1
+    model = build_model(num_classes=num_classes)
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.to(device).eval()
+
+    if use_focal:
+        # max_val 用 50.0 作為推論時的保守上界（訓練時 99.9th percentile 通常 30-50）
+        bin_edges   = BIN_EDGES_FIXED + [max(args.max_val, 26.0)]
+        bin_centers = BIN_CENTERS_FIXED + [(25.6 + bin_edges[-1]) / 2]
+        bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
 
     out_dir = Path(args.out_dir) / "test_files"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -62,13 +71,16 @@ def predict(args):
         for inputs, _, unique_ids, time_feat in tqdm(loader, desc="Predicting"):
             inputs    = inputs.to(device)
             time_feat = time_feat.to(device)
-            # preds: (B, 1, sat_H, sat_W) — satellite native resolution
             preds = model(inputs, time_feat)
             # Resize to GPM_SIZE (41×41) for submission
             preds = F.interpolate(
                 preds, size=GPM_SIZE, mode="bilinear", align_corners=False
             )
-            preds = torch.expm1(preds.clamp(min=0)).cpu().numpy()
+            if use_focal:
+                probs = F.softmax(preds.float(), dim=1)
+                preds = (probs * bin_center_t).sum(dim=1, keepdim=True).clamp(min=0).cpu().numpy()
+            else:
+                preds = torch.expm1(preds.clamp(min=0)).cpu().numpy()
 
             for i, unique_id in enumerate(unique_ids):
                 row       = df_test[df_test["unique_id"] == unique_id].iloc[0]
@@ -104,5 +116,9 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", default="best_model.pth")
     parser.add_argument("--out_dir",    default="./submission")
     parser.add_argument("--input_size", type=int, default=128)
+    parser.add_argument("--loss_type", default="focal",
+                        help="focal: Focal Loss checkpoint (10ch); combined: regression checkpoint (1ch).")
+    parser.add_argument("--max_val", type=float, default=50.0,
+                        help="Max bin edge (mm/hr). Should match training max_val printed during training.")
     args = parser.parse_args()
     predict(args)
