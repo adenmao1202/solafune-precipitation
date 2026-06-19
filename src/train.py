@@ -428,7 +428,7 @@ if __name__ == "__main__":
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
     parser.add_argument("--early_stop_patience", type=int, default=30,
                         help="Stop training if val RMSE does not improve for this many epochs.")
-    parser.add_argument("--loss_type", default="focal",
+    parser.add_argument("--loss_type", default="combined",
                         help="focal: FocalLossIMERG (10 log-bins); combined: 0.7*MSE+0.3*MAE regression.")
     parser.add_argument("--gamma", type=float, default=2.0,
                         help="Focal Loss gamma (focusing parameter). Default 2.0 per GENESIS.")
