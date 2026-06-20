@@ -300,6 +300,10 @@ def save_experiment(args, best_val_rmse: float, epochs_run: int):
 
 
 def train(args):
+    # Expand ~ in paths immediately so all downstream code sees absolute paths
+    args.data_dir  = str(Path(args.data_dir).expanduser().resolve())
+    args.csv_train = str(Path(args.csv_train).expanduser().resolve())
+
     run_dir = Path("runs") / args.run_name
     run_dir.mkdir(parents=True, exist_ok=True)
     with open(run_dir / "args.json", "w") as f:
