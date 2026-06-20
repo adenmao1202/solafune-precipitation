@@ -419,6 +419,13 @@ def train(args):
             # Save EMA weights directly so best_model.pth is ready for inference
             ema.apply(model)
             torch.save(model.state_dict(), run_dir / "best_model.pth")
+            torch.save({
+                "epoch": epoch,
+                "model_state_dict": model.state_dict(),
+                "optimizer_state_dict": optimizer.state_dict(),
+                "scheduler_state_dict": scheduler.state_dict(),
+                "best_val_rmse": best_val_rmse,
+            }, run_dir / "checkpoint.pth")
             ema.restore(model)
             print(f"  -> Saved best model (RMSE={best_val_rmse:.4f})")
         else:
