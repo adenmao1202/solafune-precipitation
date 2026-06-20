@@ -185,11 +185,21 @@ class EMA:
 # Compute inverse-frequency alpha for Focal Loss bins.
 # Scans all training GPM files once; results are printed for verification.
 # ---------------------------------------------------------------------------
-def compute_bin_alpha(train_idx: list, full_ds):
+def compute_bin_alpha(train_idx: list, full_ds, cache_path: Path | None = None):
     """Two-pass scan: pass1 finds max_val, generates log-spaced bins; pass2 counts freq.
-    Returns (alpha, bin_edges, bin_centers)."""
+    Returns (alpha, bin_edges, bin_centers). Result cached to cache_path if provided."""
     import rasterio
     from tqdm import tqdm
+
+    # Load from cache if available (same data → same result)
+    if cache_path and cache_path.exists():
+        with open(cache_path) as f:
+            cached = json.load(f)
+        if cached.get("num_bins") == NUM_BINS:
+            print(f"Loaded bin alpha from cache: {cache_path}")
+            print(f"max_val={cached['bin_edges'][-1]:.2f} mm/hr")
+            print(f"Bin alpha: {[f'{a:.4f}' for a in cached['alpha']]}")
+            return cached["alpha"], cached["bin_edges"], cached["bin_centers"]
 
     # Pass 1: find max_val
     max_val = 0.0
@@ -237,6 +247,13 @@ def compute_bin_alpha(train_idx: list, full_ds):
     print(f"max_val={max_val:.2f} mm/hr | edges(first 5): {[f'{e:.3f}' for e in bin_edges[:6]]}")
     print(f"Bin freq%: {[f'{f*100:.2f}' for f in freq_norm]}")
     print(f"Bin alpha: {[f'{a:.4f}' for a in alpha]}")
+
+    if cache_path:
+        with open(cache_path, "w") as f:
+            json.dump({"num_bins": NUM_BINS, "alpha": alpha,
+                       "bin_edges": bin_edges, "bin_centers": bin_centers}, f)
+        print(f"Bin alpha cached -> {cache_path}")
+
     return alpha, bin_edges, bin_centers
 
 
@@ -376,7 +393,8 @@ def train(args):
 
     if use_focal:
         print("Computing Focal Loss bin frequencies (14 dynamic log-spaced bins)...")
-        alpha, bin_edges, bin_centers = compute_bin_alpha(train_idx, full_ds)
+        bin_cache = Path(args.data_dir) / f"focal_alpha_cache_{args.val_mode}.json"
+        alpha, bin_edges, bin_centers = compute_bin_alpha(train_idx, full_ds, cache_path=bin_cache)
         criterion = FocalLossIMERG(bin_edges=bin_edges, alpha=alpha, gamma=args.gamma)
         bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
         with open(run_dir / "focal_config.json", "w") as f:
