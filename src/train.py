@@ -18,7 +18,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
-from dataset import PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR, GPM_SIZE
+from dataset import (PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR,
+                     GPM_SIZE, IN_CHANNELS, IR_CHANNELS)
 from model import build_model
 
 
@@ -101,10 +102,18 @@ def compute_stats(csv_path: Path, data_dir: Path, out_path: Path, max_samples: i
 # v8a regression (0.7*MSE+0.3*MAE) confirmed ceiling; classification framework
 # needed to break through 80% zero-pixel gradient dominance.
 # ---------------------------------------------------------------------------
-NUM_BINS = 10
-# Fixed edges [0..25.6]; max_val (99.9th percentile) appended at runtime
-BIN_EDGES_FIXED = [0.0, 0.1, 0.2, 0.4, 0.8, 1.6, 3.2, 6.4, 12.8, 25.6]
-BIN_CENTERS_FIXED = [0.0, 0.15, 0.3, 0.6, 1.2, 2.4, 4.8, 9.6, 19.2]  # last added at runtime
+NUM_BINS = 14  # dynamic log-spaced bins generated at runtime from training max_val
+
+
+def make_log_bins(max_val: float, num_bins: int = NUM_BINS):
+    """Generate num_bins log-spaced bins from 0.1 to max_val.
+    Returns (edges, centers): len(edges)=num_bins+1, len(centers)=num_bins.
+    centers[0]=0 (dry bin), centers[i]=geometric mean of edges[i]..edges[i+1]."""
+    edges = [0.0] + list(np.logspace(np.log10(0.1), np.log10(max(max_val, 0.2)), num_bins))
+    centers = [0.0]
+    for i in range(1, num_bins):
+        centers.append(float(np.sqrt(edges[i] * edges[i + 1])))
+    return edges, centers
 
 
 class FocalLossIMERG(nn.Module):
@@ -115,16 +124,17 @@ class FocalLossIMERG(nn.Module):
         self.gamma = gamma
 
     def forward(self, logits: torch.Tensor, targets_log1p: torch.Tensor) -> torch.Tensor:
-        """logits: (B, NUM_BINS, H, W); targets_log1p: (B, 1, H, W) in log1p(mm/hr)"""
+        """logits: (B, n_bins, H, W); targets_log1p: (B, 1, H, W) in log1p(mm/hr)"""
         device = logits.device
+        n_bins = len(self.alpha_list)
         edges = torch.tensor(self.edges_list, dtype=torch.float32, device=device)
-        alpha_t = torch.tensor(self.alpha_list, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
+        alpha_t = torch.tensor(self.alpha_list, dtype=torch.float32, device=device).view(1, n_bins, 1, 1)
 
         targets_mm = torch.expm1(targets_log1p.float().clamp(0, 8)).squeeze(1)  # (B, H, W)
         B, H, W = targets_mm.shape
 
-        targets_bin = torch.bucketize(targets_mm.reshape(-1), edges).clamp(0, NUM_BINS - 1).view(B, H, W)
-        targets_onehot = F.one_hot(targets_bin, num_classes=NUM_BINS).permute(0, 3, 1, 2).float()
+        targets_bin = torch.bucketize(targets_mm.reshape(-1), edges).clamp(0, n_bins - 1).view(B, H, W)
+        targets_onehot = F.one_hot(targets_bin, num_classes=n_bins).permute(0, 3, 1, 2).float()
 
         probs = F.softmax(logits, dim=1)
         log_probs = torch.log(probs + 1e-8)
@@ -175,22 +185,35 @@ class EMA:
 # Compute inverse-frequency alpha for Focal Loss bins.
 # Scans all training GPM files once; results are printed for verification.
 # ---------------------------------------------------------------------------
-def compute_bin_alpha(train_idx: list, full_ds, bin_edges_fixed: list):
-    """Returns (alpha list of NUM_BINS floats, max_val float)."""
+def compute_bin_alpha(train_idx: list, full_ds):
+    """Two-pass scan: pass1 finds max_val, generates log-spaced bins; pass2 counts freq.
+    Returns (alpha, bin_edges, bin_centers)."""
     import rasterio
     from tqdm import tqdm
 
-    edges_arr = np.array(bin_edges_fixed[1:], dtype=np.float32)  # for searchsorted
-    freq = np.zeros(NUM_BINS, dtype=np.float64)
+    # Pass 1: find max_val
     max_val = 0.0
-
-    for idx in tqdm(train_idx, desc="Scanning bins", leave=False):
+    for idx in tqdm(train_idx, desc="Pass1: max_val", leave=False):
         row = full_ds.df.iloc[idx]
         gpm_path = full_ds.data_dir / "gpm_imerg" / row["gpm_imerg_filename"]
         try:
             with rasterio.open(gpm_path) as src:
                 arr = src.read(1).astype(np.float32)
             max_val = max(max_val, float(arr.max()))
+        except Exception:
+            pass
+
+    bin_edges, bin_centers = make_log_bins(max_val)
+    edges_arr = np.array(bin_edges[1:], dtype=np.float32)
+
+    # Pass 2: count frequency per bin
+    freq = np.zeros(NUM_BINS, dtype=np.float64)
+    for idx in tqdm(train_idx, desc="Pass2: bin freq", leave=False):
+        row = full_ds.df.iloc[idx]
+        gpm_path = full_ds.data_dir / "gpm_imerg" / row["gpm_imerg_filename"]
+        try:
+            with rasterio.open(gpm_path) as src:
+                arr = src.read(1).astype(np.float32)
             bin_idx = np.searchsorted(edges_arr, arr.ravel()).clip(0, NUM_BINS - 1)
             np.add.at(freq, bin_idx, 1)
         except Exception:
@@ -199,10 +222,10 @@ def compute_bin_alpha(train_idx: list, full_ds, bin_edges_fixed: list):
     freq_norm = freq / (freq.sum() + 1e-8)
     alpha = 1.0 / (freq_norm + 1e-6)
     alpha = (alpha / alpha.sum()).tolist()
-    print(f"Bin alpha: {[f'{a:.4f}' for a in alpha]}")
+    print(f"max_val={max_val:.2f} mm/hr | edges(first 5): {[f'{e:.3f}' for e in bin_edges[:6]]}")
     print(f"Bin freq%: {[f'{f*100:.2f}' for f in freq_norm]}")
-    print(f"max_val (training GPM): {max_val:.2f} mm/hr")
-    return alpha, max_val
+    print(f"Bin alpha: {[f'{a:.4f}' for a in alpha]}")
+    return alpha, bin_edges, bin_centers
 
 
 # ---------------------------------------------------------------------------
@@ -252,7 +275,8 @@ def stratified_sample(train_idx: list, rain_labels: dict, seed: int = 42) -> lis
 def save_experiment(args, best_val_rmse: float, epochs_run: int):
     log_path = Path("experiments.csv")
     fieldnames = ["run_name", "datetime", "epochs_run", "best_val_rmse",
-                  "lr", "batch_size", "encoder", "loss_type", "lb_score", "notes"]
+                  "lr", "batch_size", "encoder", "loss_type", "band_selection",
+                  "lb_score", "notes"]
     row = {
         "run_name":       args.run_name,
         "datetime":       datetime.now().strftime("%Y-%m-%d %H:%M"),
@@ -262,6 +286,7 @@ def save_experiment(args, best_val_rmse: float, epochs_run: int):
         "batch_size":     args.batch_size,
         "encoder":        args.encoder,
         "loss_type":      args.loss_type,
+        "band_selection": getattr(args, "band_selection", "all"),
         "lb_score":       "",
         "notes":          "",
     }
@@ -297,6 +322,9 @@ def train(args):
     # 2. Dataset
     from tqdm import tqdm
     print("Loading dataset...")
+    band_selection = getattr(args, "band_selection", "all")
+    if band_selection == "all":
+        band_selection = None
     input_size = (args.input_size, args.input_size) if args.input_size else None
     full_ds = PrecipDataset(
         csv_path=Path(args.csv_train),
@@ -304,6 +332,7 @@ def train(args):
         stats=stats,
         is_train=True,
         input_size=input_size,
+        band_selection=band_selection,
     )
     if args.val_mode == "holdout":
         holdout_locs = [s.strip() for s in args.holdout_locations.split(",")]
@@ -323,16 +352,16 @@ def train(args):
     # 3. Model + Loss
     use_focal = (args.loss_type == "focal")
     num_classes = NUM_BINS if use_focal else 1
-    print("Building model...")
-    model = build_model(encoder_name=args.encoder, num_classes=num_classes).to(device)
+    in_channels = IR_CHANNELS if band_selection == "ir_split_window" else IN_CHANNELS
+    print(f"Building model (in_channels={in_channels}, num_classes={num_classes})...")
+    model = build_model(encoder_name=args.encoder, num_classes=num_classes,
+                        in_channels=in_channels).to(device)
     print("Model ready.")
 
     if use_focal:
-        print("Computing Focal Loss bin frequencies...")
-        alpha, max_val = compute_bin_alpha(train_idx, full_ds, BIN_EDGES_FIXED)
-        bin_edges   = BIN_EDGES_FIXED + [max(max_val, 26.0)]
-        bin_centers = BIN_CENTERS_FIXED + [(25.6 + bin_edges[-1]) / 2]
-        criterion   = FocalLossIMERG(bin_edges=bin_edges, alpha=alpha, gamma=args.gamma)
+        print("Computing Focal Loss bin frequencies (14 dynamic log-spaced bins)...")
+        alpha, bin_edges, bin_centers = compute_bin_alpha(train_idx, full_ds)
+        criterion = FocalLossIMERG(bin_edges=bin_edges, alpha=alpha, gamma=args.gamma)
         bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
         with open(run_dir / "focal_config.json", "w") as f:
             json.dump({"max_val": float(bin_edges[-1]), "bin_edges": bin_edges,
@@ -364,7 +393,7 @@ def train(args):
         # --- Train ---
         model.train()
         train_loss = 0.0
-        train_bar = tqdm(train_loader, desc=f"Epoch {epoch:03d} [train]", leave=False)
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch:03d} [train]", leave=False, dynamic_ncols=True)
         for inputs, targets, _, time_feat in train_bar:
             inputs, targets = inputs.to(device), targets.to(device)
             time_feat = time_feat.to(device)
@@ -388,7 +417,7 @@ def train(args):
         sq_errors = []
         sq_errors_rain = []
         with torch.no_grad():
-            val_bar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [val]  ", leave=False)
+            val_bar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [val]  ", leave=False, dynamic_ncols=True)
             for inputs, targets, _, time_feat in val_bar:
                 inputs, targets = inputs.to(device), targets.to(device)
                 time_feat = time_feat.to(device)
@@ -415,6 +444,18 @@ def train(args):
         scheduler.step(val_rmse)
         current_lr = optimizer.param_groups[0]['lr']
         print(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f} | val_RMSE_rain={val_rmse_rain:.4f} | lr={current_lr:.2e}")
+
+        # Per-epoch history CSV
+        history_path = run_dir / "history.csv"
+        history_fields = ["epoch", "train_loss", "val_rmse", "val_rmse_rain", "lr"]
+        write_header = not history_path.exists()
+        with open(history_path, "a", newline="") as hf:
+            hw = csv.DictWriter(hf, fieldnames=history_fields)
+            if write_header:
+                hw.writeheader()
+            hw.writerow({"epoch": epoch, "train_loss": f"{avg_train:.6f}",
+                         "val_rmse": f"{val_rmse:.6f}", "val_rmse_rain": f"{val_rmse_rain:.6f}",
+                         "lr": f"{current_lr:.2e}"})
 
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
@@ -457,8 +498,11 @@ if __name__ == "__main__":
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
     parser.add_argument("--early_stop_patience", type=int, default=30,
                         help="Stop training if val RMSE does not improve for this many epochs.")
+    parser.add_argument("--band_selection", default="all",
+                        choices=["all", "ir_split_window"],
+                        help="all: 51ch (16 bands x 3 frames + masks); ir_split_window: 12ch IR only.")
     parser.add_argument("--loss_type", default="combined",
-                        help="focal: FocalLossIMERG (10 log-bins); combined: 0.7*MSE+0.3*MAE regression.")
+                        help="focal: FocalLossIMERG (14 dynamic log-bins); combined: 0.7*MSE+0.3*MAE regression.")
     parser.add_argument("--gamma", type=float, default=2.0,
                         help="Focal Loss gamma (focusing parameter). Default 2.0 per GENESIS.")
     parser.add_argument("--ema_decay", type=float, default=0.999,

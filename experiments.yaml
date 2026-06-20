@@ -1,0 +1,35 @@
+# Solafune experiment queue — run with: python run_all.py
+# Each entry maps to one train.py call. Missing keys use the defaults below.
+# Run order is top-to-bottom sequential (one GPU).
+
+defaults:
+  data_dir: ~/solafune/data
+  csv_train: ~/solafune/data/train_dataset.csv
+  epochs: 40
+  batch_size: 8
+  num_workers: 4
+  input_size: 128
+  lr: 1.0e-4
+  ema_decay: 0.999
+  scheduler_patience: 5
+  early_stop_patience: 15
+  val_mode: holdout
+  holdout_locations: "florida,france,jakarta,kinshasa"
+  encoder: efficientnet-b4
+
+experiments:
+  # Exp 2: Focal Loss + 14 dynamic log-spaced bins, full 51ch
+  # First clean test of Focal with honest 41x41 target + ReduceLROnPlateau
+  - run_name: v12_focal_14bins
+    loss_type: focal
+    band_selection: all
+    gamma: 2.0
+    epochs: 40
+
+  # Exp 3: Focal Loss + IR-only 12ch (split-window bands)
+  # BL2 split_window gave 32% improvement; combined with Focal for heavy rain
+  - run_name: v13_ir12ch_focal
+    loss_type: focal
+    band_selection: ir_split_window
+    gamma: 2.0
+    epochs: 40

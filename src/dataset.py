@@ -37,6 +37,17 @@ MAX_FRAMES  = 3
 N_BANDS     = 16
 IN_CHANNELS = MAX_FRAMES * N_BANDS + MAX_FRAMES  # 51
 
+# IR split-window band selection (0-based indices, applied AFTER meteosat band swap)
+# Matches BL2 best combo: ir_window(10.4um) + ir_split(12.3um) + wv_upper(6.2um)
+# meteosat: indices post-swap — arr[[12,13]]=arr[[13,12]] moves ir_105 to index 12
+IR_SPLIT_WINDOW_BANDS = {
+    "himawari": [7, 12, 14],   # B08(6.2um), B13(10.4um), B15(12.3um)
+    "goes":     [7, 12, 14],   # C08(6.2um), C13(10.4um), C15(12.3um)
+    "meteosat": [9, 12, 14],   # wv_63(6.2um), ir_105(10.5um post-swap), ir_123(12.3um)
+}
+IR_BANDS_PER_FRAME = 3
+IR_CHANNELS = IR_BANDS_PER_FRAME * MAX_FRAMES + MAX_FRAMES  # 12
+
 
 def get_device() -> torch.device:
     if torch.cuda.is_available():
@@ -84,13 +95,15 @@ class PrecipDataset(Dataset):
 
     def __init__(self, csv_path: Path, data_dir: Path, stats: dict,
                  is_train: bool = True, transform=None,
-                 input_size: tuple[int, int] | None = None):
-        self.df         = pd.read_csv(csv_path)
-        self.data_dir   = Path(data_dir)
-        self.stats      = stats
-        self.is_train   = is_train
-        self.transform  = transform
-        self.input_size = input_size  # (H, W) or None
+                 input_size: tuple[int, int] | None = None,
+                 band_selection: str | None = None):
+        self.df             = pd.read_csv(csv_path)
+        self.data_dir       = Path(data_dir)
+        self.stats          = stats
+        self.is_train       = is_train
+        self.transform      = transform
+        self.input_size     = input_size  # (H, W) or None
+        self.band_selection = band_selection  # None = all 16 bands; "ir_split_window" = 3 IR bands
 
     def __len__(self):
         return len(self.df)
@@ -105,6 +118,10 @@ class PrecipDataset(Dataset):
 
         sat_h, sat_w = SAT_SIZE[satellite]
         out_h, out_w  = self.input_size if self.input_size else (sat_h, sat_w)
+
+        use_ir = self.band_selection == "ir_split_window"
+        n_out_bands = IR_BANDS_PER_FRAME if use_ir else N_BANDS
+        ir_idx = IR_SPLIT_WINDOW_BANDS[satellite] if use_ir else None
 
         frames, masks = [], []
         for i in range(MAX_FRAMES):
@@ -126,14 +143,15 @@ class PrecipDataset(Dataset):
                     if satellite == "meteosat":
                         arr[[12, 13]] = arr[[13, 12]]
                     arr = normalize_per_band(arr, self.stats, satellite)
+                    if use_ir:
+                        arr = arr[ir_idx]  # (3, H, W)
                     frames.append(arr)
                     masks.append(np.ones((1, sat_h, sat_w), dtype=np.float32))
                 else:
-                    # Corrupt file: treat as missing frame
-                    frames.append(np.zeros((N_BANDS, sat_h, sat_w), dtype=np.float32))
+                    frames.append(np.zeros((n_out_bands, sat_h, sat_w), dtype=np.float32))
                     masks.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
             else:
-                frames.append(np.zeros((N_BANDS, sat_h, sat_w), dtype=np.float32))
+                frames.append(np.zeros((n_out_bands, sat_h, sat_w), dtype=np.float32))
                 masks.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
 
         input_tensor = torch.from_numpy(np.concatenate(frames + masks, axis=0))

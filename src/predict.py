@@ -17,9 +17,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from dataset import PrecipDataset, get_device, GPM_SIZE
+from dataset import PrecipDataset, get_device, GPM_SIZE, IN_CHANNELS, IR_CHANNELS
 from model import build_model
-from train import NUM_BINS, BIN_EDGES_FIXED, BIN_CENTERS_FIXED
 
 
 def predict(args):
@@ -28,6 +27,7 @@ def predict(args):
     with open(Path(args.data_dir) / "stats.json") as f:
         stats = json.load(f)
 
+    band_selection = args.band_selection if args.band_selection != "all" else None
     input_size = (args.input_size, args.input_size) if args.input_size else None
     test_ds = PrecipDataset(
         csv_path=Path(args.csv_test),
@@ -35,25 +35,31 @@ def predict(args):
         stats=stats,
         is_train=False,
         input_size=input_size,
+        band_selection=band_selection,
     )
     loader = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=4)
 
     use_focal = (args.loss_type == "focal")
-    num_classes = NUM_BINS if use_focal else 1
-    model = build_model(num_classes=num_classes)
-    model.load_state_dict(torch.load(args.model_path, map_location=device))
-    model.to(device).eval()
+    in_channels = IR_CHANNELS if band_selection == "ir_split_window" else IN_CHANNELS
 
     if use_focal:
         focal_cfg_path = Path(args.model_path).parent / "focal_config.json"
-        if focal_cfg_path.exists():
-            with open(focal_cfg_path) as f:
-                focal_cfg = json.load(f)
-            bin_centers = focal_cfg["bin_centers"]
-        else:
-            bin_edges   = BIN_EDGES_FIXED + [max(args.max_val, 26.0)]
-            bin_centers = BIN_CENTERS_FIXED + [(25.6 + bin_edges[-1]) / 2]
-        bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
+        if not focal_cfg_path.exists():
+            raise FileNotFoundError(f"focal_config.json not found at {focal_cfg_path}. "
+                                    "Run training first or use --loss_type=combined.")
+        with open(focal_cfg_path) as f:
+            focal_cfg = json.load(f)
+        bin_centers = focal_cfg["bin_centers"]
+        n_bins = len(bin_centers)
+        bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, n_bins, 1, 1)
+        num_classes = n_bins
+    else:
+        num_classes = 1
+        bin_center_t = None
+
+    model = build_model(num_classes=num_classes, in_channels=in_channels)
+    model.load_state_dict(torch.load(args.model_path, map_location=device))
+    model.to(device).eval()
 
     out_dir = Path(args.out_dir) / "test_files"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -82,6 +88,7 @@ def predict(args):
                 preds, size=GPM_SIZE, mode="bilinear", align_corners=False
             )
             if use_focal:
+                assert bin_center_t is not None
                 probs = F.softmax(preds.float(), dim=1)
                 preds = (probs * bin_center_t).sum(dim=1, keepdim=True).clamp(min=0).cpu().numpy()
             else:
@@ -121,9 +128,10 @@ if __name__ == "__main__":
     parser.add_argument("--model_path", default="best_model.pth")
     parser.add_argument("--out_dir",    default="./submission")
     parser.add_argument("--input_size", type=int, default=128)
+    parser.add_argument("--band_selection", default="all",
+                        choices=["all", "ir_split_window"],
+                        help="Must match training band_selection. all=51ch, ir_split_window=12ch.")
     parser.add_argument("--loss_type", default="focal",
-                        help="focal: Focal Loss checkpoint (10ch); combined: regression checkpoint (1ch).")
-    parser.add_argument("--max_val", type=float, default=50.0,
-                        help="Max bin edge (mm/hr). Should match training max_val printed during training.")
+                        help="focal: Focal Loss checkpoint (bin_centers from focal_config.json); combined: regression.")
     args = parser.parse_args()
     predict(args)

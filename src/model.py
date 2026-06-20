@@ -39,7 +39,8 @@ class PrecipUNet(smp.Unet):
 
 def build_model(encoder_name: str = "efficientnet-b4",
                 encoder_weights: str = "imagenet",
-                num_classes: int = 1) -> nn.Module:
+                num_classes: int = 1,
+                in_channels: int | None = None) -> nn.Module:
     """
     UNet with EfficientNet-B4 encoder + FiLM time conditioning.
 
@@ -47,14 +48,16 @@ def build_model(encoder_name: str = "efficientnet-b4",
     allowing the model to learn seasonal and diurnal precipitation patterns.
     Based on NPM paper ablation: day encoding alone = +17% CSI.
 
-    encoder_weights="imagenet": front 3ch get ImageNet prior (VIS/NIR channels).
-    v7 showed Kaiming reinit is worse than partial ImageNet for our 51ch input.
+    encoder_weights="imagenet": front 3ch get ImageNet prior.
+    in_channels: defaults to IN_CHANNELS (51). Pass IR_CHANNELS (12) for IR-only mode.
     """
+    if in_channels is None:
+        in_channels = IN_CHANNELS
     model = PrecipUNet(
         time_dim=4,
         encoder_name=encoder_name,
         encoder_weights=encoder_weights,
-        in_channels=IN_CHANNELS,
+        in_channels=in_channels,
         classes=num_classes,
         activation=None,
         decoder_use_batchnorm=True,
