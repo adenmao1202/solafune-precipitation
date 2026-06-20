@@ -45,9 +45,14 @@ def predict(args):
     model.to(device).eval()
 
     if use_focal:
-        # max_val 用 50.0 作為推論時的保守上界（訓練時 99.9th percentile 通常 30-50）
-        bin_edges   = BIN_EDGES_FIXED + [max(args.max_val, 26.0)]
-        bin_centers = BIN_CENTERS_FIXED + [(25.6 + bin_edges[-1]) / 2]
+        focal_cfg_path = Path(args.model_path).parent / "focal_config.json"
+        if focal_cfg_path.exists():
+            with open(focal_cfg_path) as f:
+                focal_cfg = json.load(f)
+            bin_centers = focal_cfg["bin_centers"]
+        else:
+            bin_edges   = BIN_EDGES_FIXED + [max(args.max_val, 26.0)]
+            bin_centers = BIN_CENTERS_FIXED + [(25.6 + bin_edges[-1]) / 2]
         bin_center_t = torch.tensor(bin_centers, dtype=torch.float32, device=device).view(1, NUM_BINS, 1, 1)
 
     out_dir = Path(args.out_dir) / "test_files"
