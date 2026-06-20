@@ -56,7 +56,7 @@ def run_experiment(run_name: str, params: dict) -> bool:
         proc = subprocess.Popen(
             cmd,
             stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
+            stderr=None,   # tqdm writes to stderr; let it go directly to terminal
             text=True,
             bufsize=1,
         )
@@ -67,8 +67,8 @@ def run_experiment(run_name: str, params: dict) -> bool:
             sys.stdout.flush()
             log_file.write(line)
             log_file.flush()
-            # Track best val RMSE from epoch log lines
-            if "val_RMSE=" in line and "Saved best" in line:
+            # Track best val RMSE from saved-best lines
+            if "Saved best model" in line:
                 try:
                     last_rmse = line.split("RMSE=")[1].split(")")[0].strip()
                 except Exception:
