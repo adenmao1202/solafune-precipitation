@@ -18,7 +18,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
-from dataset import PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR
+from dataset import PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR, GPM_SIZE
 from model import build_model
 
 
@@ -371,7 +371,8 @@ def train(args):
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 preds = model(inputs, time_feat)
-                loss  = criterion(preds, targets)
+                preds_41 = F.interpolate(preds, size=GPM_SIZE, mode="bilinear", align_corners=False)
+                loss  = criterion(preds_41, targets)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -395,10 +396,12 @@ def train(args):
                     preds = model(inputs, time_feat)
                 targets_real = torch.expm1(targets.float().clamp(0, 8))
                 if use_focal:
-                    probs    = F.softmax(preds.float(), dim=1)
+                    preds_41 = F.interpolate(preds.float(), size=GPM_SIZE, mode="bilinear", align_corners=False)
+                    probs    = F.softmax(preds_41, dim=1)
                     pred_mm  = (probs * bin_center_t).sum(dim=1, keepdim=True)
                 else:
-                    pred_mm = torch.expm1(preds.float().clamp(0, 8))
+                    preds_41 = F.interpolate(preds.float(), size=GPM_SIZE, mode="bilinear", align_corners=False)
+                    pred_mm = torch.expm1(preds_41.clamp(0, 8))
                 sq = (pred_mm - targets_real) ** 2
                 sq_errors.append(sq[torch.isfinite(sq)].cpu().numpy().ravel())
                 rain_mask = (targets_real > 0) & torch.isfinite(sq)

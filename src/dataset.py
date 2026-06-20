@@ -147,12 +147,12 @@ class PrecipDataset(Dataset):
             gpm_arr = read_tif(self.data_dir / "gpm_imerg" / row["gpm_imerg_filename"])
             if gpm_arr is not None:
                 target_tensor = torch.from_numpy(np.log1p(gpm_arr))
-                if target_tensor.shape[-2:] != (out_h, out_w):
-                    target_tensor = resize_to(target_tensor, (out_h, out_w))
+                if target_tensor.shape[-2:] != GPM_SIZE:
+                    target_tensor = resize_to(target_tensor, GPM_SIZE)
             else:
-                target_tensor = torch.zeros(1, out_h, out_w)
+                target_tensor = torch.zeros(1, *GPM_SIZE)
         else:
-            target_tensor = torch.zeros(1, out_h, out_w)
+            target_tensor = torch.zeros(1, *GPM_SIZE)
 
         if self.transform:
             input_tensor, target_tensor = self.transform(input_tensor, target_tensor)
