@@ -220,8 +220,20 @@ def compute_bin_alpha(train_idx: list, full_ds):
             pass
 
     freq_norm = freq / (freq.sum() + 1e-8)
-    alpha = 1.0 / (freq_norm + 1e-6)
-    alpha = (alpha / alpha.sum()).tolist()
+
+    # Power scaling (exponent=0.5) prevents near-empty bins from dominating.
+    # 1/freq gives bin13 (~0% freq) an alpha 200,000x larger than light-rain bins.
+    # sqrt(1/freq) compresses that ratio to ~450x, then clipping to 50x keeps it sane.
+    alpha_raw = 1.0 / np.sqrt(freq_norm + 1e-6)
+    # Zero out bins with essentially no samples (< 0.001% of pixels)
+    alpha_raw[freq_norm < 1e-4] = 0.0
+    # Clip to 50x the lightest non-dry rain bin to prevent any single bin dominating
+    rain_bins = alpha_raw[1:]  # exclude dry bin
+    if rain_bins[rain_bins > 0].size > 0:
+        cap = float(rain_bins[rain_bins > 0].min()) * 50
+        alpha_raw = np.minimum(alpha_raw, cap)
+    alpha = (alpha_raw / (alpha_raw.sum() + 1e-8)).tolist()
+
     print(f"max_val={max_val:.2f} mm/hr | edges(first 5): {[f'{e:.3f}' for e in bin_edges[:6]]}")
     print(f"Bin freq%: {[f'{f*100:.2f}' for f in freq_norm]}")
     print(f"Bin alpha: {[f'{a:.4f}' for a in alpha]}")
