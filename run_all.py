@@ -90,6 +90,10 @@ def main():
                         help="Skip all experiments before this run_name.")
     parser.add_argument("--dry_run", action="store_true",
                         help="Print commands without running them.")
+    parser.add_argument("--auto_stop", action="store_true",
+                        help="Stop Vast.ai instance after all experiments finish (requires vastai CLI).")
+    parser.add_argument("--instance_id", default=None,
+                        help="Vast.ai instance ID to stop. If omitted, reads $VAST_CONTAINERLABEL env var.")
     args = parser.parse_args()
 
     with open(args.config) as f:
@@ -134,6 +138,17 @@ def main():
     print("="*60)
     for name, status in results:
         print(f"  {name}: {status}")
+
+    if args.auto_stop:
+        import os
+        instance_id = args.instance_id or os.environ.get("VAST_CONTAINERLABEL", "")
+        if not instance_id:
+            print("\n[auto_stop] Could not find instance ID. "
+                  "Pass --instance_id or set $VAST_CONTAINERLABEL.")
+        else:
+            print(f"\n[auto_stop] Stopping instance {instance_id}...")
+            send_ntfy("Stopping instance", f"All experiments done. Stopping {instance_id}.")
+            os.system(f"vastai stop instance {instance_id}")
 
 
 if __name__ == "__main__":
