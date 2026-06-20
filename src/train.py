@@ -321,16 +321,14 @@ def train(args):
         criterion    = CombinedLoss()
         bin_center_t = None
 
-    # 4. Optimizer + Scheduler (OneCycleLR)
+    # 4. Optimizer + Scheduler (ReduceLROnPlateau)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=1e-4)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
-        max_lr=args.lr * 10,
-        epochs=args.epochs,
-        steps_per_epoch=len(train_loader),
-        pct_start=0.3,
-        div_factor=25,
-        final_div_factor=1e4,
+        mode='min',
+        factor=0.5,
+        patience=args.scheduler_patience,
+        min_lr=1e-7,
     )
 
     # 5. EMA
@@ -359,7 +357,6 @@ def train(args):
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
-            scheduler.step()
             ema.update(model)
             train_loss += loss.item()
             train_bar.set_postfix(loss=f"{loss.item():.4f}")
@@ -392,7 +389,9 @@ def train(args):
         val_rmse = float(np.sqrt(np.concatenate(sq_errors).mean()))
         val_rmse_rain = float(np.sqrt(np.concatenate(sq_errors_rain).mean())) if sq_errors_rain else float("nan")
         avg_train = train_loss / len(train_loader)
-        print(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f} | val_RMSE_rain={val_rmse_rain:.4f} | lr={scheduler.get_last_lr()[0]:.2e}")
+        scheduler.step(val_rmse)
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f} | val_RMSE_rain={val_rmse_rain:.4f} | lr={current_lr:.2e}")
 
         if val_rmse < best_val_rmse:
             best_val_rmse = val_rmse
@@ -432,8 +431,10 @@ if __name__ == "__main__":
                         help="focal: FocalLossIMERG (10 log-bins); combined: 0.7*MSE+0.3*MAE regression.")
     parser.add_argument("--gamma", type=float, default=2.0,
                         help="Focal Loss gamma (focusing parameter). Default 2.0 per GENESIS.")
-    parser.add_argument("--ema_decay", type=float, default=0.995,
-                        help="EMA decay factor. Default 0.995.")
+    parser.add_argument("--ema_decay", type=float, default=0.999,
+                        help="EMA decay factor. Default 0.999.")
+    parser.add_argument("--scheduler_patience", type=int, default=5,
+                        help="ReduceLROnPlateau patience. Default 5.")
     parser.add_argument("--run_name", default=datetime.now().strftime("%Y%m%d_%H%M"),
                         help="Experiment name. Output saved to runs/{run_name}/")
     args = parser.parse_args()

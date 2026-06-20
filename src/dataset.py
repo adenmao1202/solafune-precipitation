@@ -161,9 +161,6 @@ class PrecipDataset(Dataset):
             if random.random() < 0.5:
                 input_tensor  = torch.flip(input_tensor,  dims=[-1])
                 target_tensor = torch.flip(target_tensor, dims=[-1])
-            if random.random() < 0.5:
-                input_tensor  = torch.flip(input_tensor,  dims=[-2])
-                target_tensor = torch.flip(target_tensor, dims=[-2])
 
         dt   = pd.to_datetime(row["datetime"])
         day  = dt.day_of_year
