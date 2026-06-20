@@ -1,9 +1,15 @@
 """
 推論腳本：產生比賽提交格式。
 
-使用方式：
+最簡單的用法（從 run_name 自動讀取所有訓練設定）：
+  python predict.py --run_name v12_focal_14bins \
+                    --data_dir ~/solafune/data \
+                    --csv_test ~/solafune/data/test_dataset.csv
+
+手動指定（不需要 run_name）：
   python predict.py --data_dir /path/to/data --csv_test test.csv \
-                    --model_path best_model.pth --out_dir ./submission
+                    --model_path runs/v12_focal_14bins/best_model.pth \
+                    --loss_type focal --band_selection all
 """
 import argparse
 import json
@@ -123,15 +129,55 @@ def predict(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--data_dir",   required=True)
-    parser.add_argument("--csv_test",   required=True)
-    parser.add_argument("--model_path", default="best_model.pth")
-    parser.add_argument("--out_dir",    default="./submission")
-    parser.add_argument("--input_size", type=int, default=128)
-    parser.add_argument("--band_selection", default="all",
-                        choices=["all", "ir_split_window"],
-                        help="Must match training band_selection. all=51ch, ir_split_window=12ch.")
-    parser.add_argument("--loss_type", default="focal",
-                        help="focal: Focal Loss checkpoint (bin_centers from focal_config.json); combined: regression.")
+    # Convenience: auto-load all settings from a previous run
+    parser.add_argument("--run_name", default=None,
+                        help="Load loss_type/band_selection/input_size from runs/<run_name>/args.json. "
+                             "Also sets model_path and out_dir automatically.")
+    parser.add_argument("--data_dir",  required=True,
+                        help="Data directory (must contain stats.json and test_files/).")
+    parser.add_argument("--csv_test",  required=True,
+                        help="Path to test_dataset.csv.")
+    # Manual overrides (ignored when --run_name is given, unless explicitly set)
+    parser.add_argument("--model_path",     default=None)
+    parser.add_argument("--out_dir",        default=None)
+    parser.add_argument("--input_size",     type=int, default=None)
+    parser.add_argument("--band_selection", default=None, choices=["all", "ir_split_window"])
+    parser.add_argument("--loss_type",      default=None)
     args = parser.parse_args()
+
+    # If run_name given, load training args and fill in defaults
+    if args.run_name:
+        run_dir  = Path("runs") / args.run_name
+        args_path = run_dir / "args.json"
+        if not args_path.exists():
+            parser.error(f"args.json not found: {args_path}")
+        with open(args_path) as f:
+            train_args = json.load(f)
+        if args.model_path is None:
+            args.model_path = str(run_dir / "best_model.pth")
+        if args.out_dir is None:
+            args.out_dir = str(run_dir / "submission")
+        if args.input_size is None:
+            args.input_size = train_args.get("input_size", 128)
+        if args.band_selection is None:
+            args.band_selection = train_args.get("band_selection", "all")
+        if args.loss_type is None:
+            args.loss_type = train_args.get("loss_type", "combined")
+        print(f"Loaded from {args_path}:")
+        print(f"  loss_type={args.loss_type}  band_selection={args.band_selection}  "
+              f"input_size={args.input_size}")
+        print(f"  model_path={args.model_path}")
+    else:
+        # Apply plain defaults when no run_name
+        if args.model_path is None:
+            args.model_path = "best_model.pth"
+        if args.out_dir is None:
+            args.out_dir = "./submission"
+        if args.input_size is None:
+            args.input_size = 128
+        if args.band_selection is None:
+            args.band_selection = "all"
+        if args.loss_type is None:
+            args.loss_type = "combined"
+
     predict(args)
