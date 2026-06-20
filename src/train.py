@@ -37,6 +37,22 @@ def temporal_split(csv_path: Path, val_ratio: float = 0.2):
     return train_idx, val_idx
 
 
+def location_holdout_split(csv_path: Path, holdout_locations: list[str]):
+    """固定地點 holdout：holdout_locations 的所有樣本作為 val，其餘訓練。
+    比 temporal split 更誠實：train/test 地點不重疊，val 應該也不重疊。"""
+    df = pd.read_csv(csv_path)
+    val_mask = df["name_location"].isin(holdout_locations)
+    train_idx = df[~val_mask].index.tolist()
+    val_idx   = df[val_mask].index.tolist()
+    train_locs = sorted(df[~val_mask]["name_location"].unique())
+    val_locs   = sorted(df[val_mask]["name_location"].unique())
+    print(f"Location holdout split: {len(train_locs)} train locs / {len(val_locs)} val locs")
+    print(f"  Train: {train_locs}")
+    print(f"  Val:   {val_locs}")
+    print(f"  Samples: {len(train_idx)} train / {len(val_idx)} val")
+    return train_idx, val_idx
+
+
 # ---------------------------------------------------------------------------
 # Step 0: 先跑這個函數，統計訓練集各衛星各波段的 mean/std，存成 stats.json
 # ---------------------------------------------------------------------------
@@ -289,10 +305,14 @@ def train(args):
         is_train=True,
         input_size=input_size,
     )
-    train_idx, val_idx = temporal_split(Path(args.csv_train), val_ratio=0.2)
+    if args.val_mode == "holdout":
+        holdout_locs = [s.strip() for s in args.holdout_locations.split(",")]
+        train_idx, val_idx = location_holdout_split(Path(args.csv_train), holdout_locs)
+    else:
+        train_idx, val_idx = temporal_split(Path(args.csv_train), val_ratio=0.2)
+        print(f"Temporal split: {len(train_idx)} train / {len(val_idx)} val")
     train_ds = Subset(full_ds, train_idx)
     val_ds   = Subset(full_ds, val_idx)
-    print(f"Temporal split: {len(train_ds)} train / {len(val_ds)} val")
 
     pin = device.type == "cuda"
     train_loader = DataLoader(train_ds, batch_size=args.batch_size,
@@ -435,6 +455,10 @@ if __name__ == "__main__":
                         help="EMA decay factor. Default 0.999.")
     parser.add_argument("--scheduler_patience", type=int, default=5,
                         help="ReduceLROnPlateau patience. Default 5.")
+    parser.add_argument("--val_mode", default="temporal",
+                        help="temporal: last 20pct per location; holdout: fixed locations as val.")
+    parser.add_argument("--holdout_locations", default="florida,france,jakarta,kinshasa",
+                        help="Comma-separated location names for holdout val (used when --val_mode=holdout).")
     parser.add_argument("--run_name", default=datetime.now().strftime("%Y%m%d_%H%M"),
                         help="Experiment name. Output saved to runs/{run_name}/")
     args = parser.parse_args()
