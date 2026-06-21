@@ -34,6 +34,25 @@ def send_ntfy(title: str, message: str):
         print(f"[ntfy] Failed to send notification: {e}")
 
 
+def recompute_stats(data_dir: str, csv_train: str):
+    """Delete and recompute stats.json using train.py's compute_stats."""
+    stats_path = Path(data_dir) / "stats.json"
+    if stats_path.exists():
+        print(f"[stats] Removing old {stats_path}")
+        stats_path.unlink()
+    print("[stats] Recomputing stats.json ...")
+    src_dir = Path(__file__).parent / "src"
+    result = subprocess.run(
+        [sys.executable, "-c",
+         f"import sys; sys.path.insert(0, '{src_dir}'); "
+         f"from train import compute_stats; from pathlib import Path; "
+         f"compute_stats(Path('{csv_train}'), Path('{data_dir}'), Path('{stats_path}')); "
+         f"print('[stats] Done.')"],
+        check=True,
+    )
+    return result.returncode == 0
+
+
 def run_experiment(run_name: str, params: dict) -> bool:
     """Run a single experiment. Returns True if successful (exit code 0)."""
     run_dir = Path("runs") / run_name
@@ -117,14 +136,26 @@ def main():
 
         # Merge defaults + experiment-specific (experiment overrides defaults)
         params = {**defaults}
+        do_recompute = False
         for k, v in exp.items():
-            if k != "run_name":
+            if k == "run_name":
+                continue
+            if k == "recompute_stats":
+                do_recompute = bool(v)
+            else:
                 params[k] = v
 
         if args.dry_run:
             cmd = [f"--{k} {v}" for k, v in params.items()]
-            print(f"DRY RUN: python src/train.py --run_name {run_name} {' '.join(cmd)}")
+            recompute_note = " [recompute_stats]" if do_recompute else ""
+            print(f"DRY RUN{recompute_note}: python src/train.py --run_name {run_name} {' '.join(cmd)}")
             continue
+
+        if do_recompute:
+            recompute_stats(
+                data_dir=str(params.get("data_dir", defaults.get("data_dir", "~/solafune/data"))),
+                csv_train=str(params.get("csv_train", defaults.get("csv_train", "~/solafune/data/train_dataset.csv"))),
+            )
 
         success = run_experiment(run_name, params)
         results.append((run_name, "OK" if success else "FAILED"))

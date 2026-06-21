@@ -6,9 +6,9 @@ defaults:
   data_dir: ~/solafune/data
   csv_train: ~/solafune/data/train_dataset.csv
   epochs: 40
-  batch_size: 64
+  batch_size: 32
   num_workers: 4
-  input_size: 128
+  input_size: 96
   lr: 1.0e-4
   ema_decay: 0.999
   scheduler_patience: 5
@@ -16,20 +16,15 @@ defaults:
   val_mode: holdout
   holdout_locations: "florida,jakarta,cape_town,friuli_venezia_giulia"
   encoder: efficientnet-b4
+  band_mode: 12slot
 
 experiments:
-  # Exp 2: Focal Loss + 14 dynamic log-spaced bins, full 51ch
-  # First clean test of Focal with honest 41x41 target + ReduceLROnPlateau
-  - run_name: v12_focal_14bins
-    loss_type: focal
-    band_selection: all
-    gamma: 2.0
-    epochs: 40
+  # v14a: 48x48 input + center crop (bottleneck 2x2)
+  # Test whether removing F.interpolate fixes val_RMSE_rain stuck at 2.2~2.4
+  - run_name: v14_48px_crop
+    input_size: 48
 
-  # Exp 3: Focal Loss + IR-only 12ch (split-window bands)
-  # BL2 split_window gave 32% improvement; combined with Focal for heavy rain
-  - run_name: v13_ir12ch_focal
-    loss_type: focal
-    band_selection: ir_split_window
-    gamma: 2.0
-    epochs: 40
+  # v14b: 96x96 input + center crop (bottleneck 3x3) — recommended
+  # More spatial context than 48x48, still no interpolation artifact
+  - run_name: v14_96px_crop
+    input_size: 96
