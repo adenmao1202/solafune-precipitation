@@ -11,12 +11,10 @@ from torch.utils.data import Dataset
 from pathlib import Path
 
 
-SATELLITE_BANDS = {
-    "himawari": ["B01","B02","B03","B04","B05","B06","B07","B08","B09","B10","B11","B12","B13","B14","B15","B16"],
-    "goes":     ["C01","C02","C03","C04","C05","C06","C07","C08","C09","C10","C11","C12","C13","C14","C15","C16"],
-    "meteosat": ["vis_04","vis_05","vis_06","vis_08","vis_09","nir_13","nir_16","nir_22","ir_38","wv_63","wv_73","ir_87","ir_97","ir_105","ir_123","ir_133"],
-}
-
+# ---------------------------------------------------------------------------
+# Per-satellite official band order (source: competition data spec)
+# All indices are 0-based.
+# ---------------------------------------------------------------------------
 SATELLITE_SUBDIR = {
     "himawari": "himawari",
     "goes":     "goes",
@@ -30,23 +28,57 @@ SAT_SIZE = {
     "meteosat": (144, 144),
 }
 
-# GPM-IMERG native output size (always 41×41 regardless of satellite)
+# GPM-IMERG native output size (always 41x41 regardless of satellite)
 GPM_SIZE = (41, 41)
 
-MAX_FRAMES  = 3
-N_BANDS     = 16
-IN_CHANNELS = MAX_FRAMES * N_BANDS + MAX_FRAMES  # 51
+MAX_FRAMES = 3
+N_BANDS    = 16  # raw bands per satellite TIF
 
-# IR split-window band selection (0-based indices, applied AFTER meteosat band swap)
-# Matches BL2 best combo: ir_window(10.4um) + ir_split(12.3um) + wv_upper(6.2um)
-# meteosat: indices post-swap — arr[[12,13]]=arr[[13,12]] moves ir_105 to index 12
-IR_SPLIT_WINDOW_BANDS = {
-    "himawari": [7, 12, 14],   # B08(6.2um), B13(10.4um), B15(12.3um)
-    "goes":     [7, 12, 14],   # C08(6.2um), C13(10.4um), C15(12.3um)
-    "meteosat": [9, 12, 14],   # wv_63(6.2um), ir_105(10.5um post-swap), ir_123(12.3um)
+# ---------------------------------------------------------------------------
+# Canonical band mapping (see /Volumes/T7/new_code/solafune/mapping.md)
+# Raw 0-based indices into the satellite TIF. No Meteosat swap needed.
+# None = satellite has no band at this wavelength -> filled with zeros.
+# ---------------------------------------------------------------------------
+CANONICAL_BANDS_12 = {
+    # Slot: [0.64, 0.8, 1.6, 2.25, 3.9, 6.2, 7.3, 8.6, 9.7, 10.4, 12.3, 13.3]
+    "himawari": [2,  3,  4,  5,  6,  7,  9,  10, 11, 12, 14, 15],
+    "goes":     [1,  2,  4,  5,  6,  7,  9,  10, 11, 12, 14, 15],
+    "meteosat": [2,  3,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15],
 }
-IR_BANDS_PER_FRAME = 3
-IR_CHANNELS = IR_BANDS_PER_FRAME * MAX_FRAMES + MAX_FRAMES  # 12
+
+CANONICAL_BANDS_18 = {
+    # Slots 0-11: same as 12-slot
+    # Slots 12-17: satellite-specific; None -> zero-pad
+    # Slot 12: 0.47um blue   (H=0, G=0, M=None)
+    # Slot 13: 0.5um green   (H=1, G=None, M=1)
+    # Slot 14: 0.9um NIR2    (H=None, G=None, M=4)
+    # Slot 15: 1.38um cirrus (H=None, G=3, M=5)
+    # Slot 16: 6.9um mid-WV  (H=8, G=8, M=None)
+    # Slot 17: 11.2um IR2    (H=13, G=13, M=None)
+    "himawari": [2,  3,  4,  5,  6,  7,  9,  10, 11, 12, 14, 15, 0,    1,    None, None, 8,    13  ],
+    "goes":     [1,  2,  4,  5,  6,  7,  9,  10, 11, 12, 14, 15, 0,    None, None, 3,    8,    13  ],
+    "meteosat": [2,  3,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, None, 1,    4,    5,    None, None],
+}
+
+N_SLOTS_12 = 12
+N_SLOTS_18 = 18
+
+# Input channel counts: n_slots * 3 frames + 3 frame-valid masks
+IN_CHANNELS_12 = N_SLOTS_12 * MAX_FRAMES + MAX_FRAMES  # 39
+IN_CHANNELS_18 = N_SLOTS_18 * MAX_FRAMES + MAX_FRAMES  # 57
+
+# FiLM conditioning dim: 4 time features + 3 satellite one-hot
+COND_DIM = 7
+
+# Satellite one-hot encoding: himawari=[1,0,0], goes=[0,1,0], meteosat=[0,0,1]
+SAT_ONEHOT = {
+    "himawari": [1.0, 0.0, 0.0],
+    "goes":     [0.0, 1.0, 0.0],
+    "meteosat": [0.0, 0.0, 1.0],
+}
+
+# Legacy alias kept for any external scripts that import IN_CHANNELS
+IN_CHANNELS = IN_CHANNELS_12
 
 
 def get_device() -> torch.device:
@@ -77,33 +109,56 @@ def normalize_per_band(arr: np.ndarray, stats: dict, satellite: str) -> np.ndarr
 
 
 def resize_to(tensor: torch.Tensor, size: tuple[int, int]) -> torch.Tensor:
-    """(C, H, W) → (C, size[0], size[1]) using bilinear interpolation."""
+    """(C, H, W) -> (C, size[0], size[1]) using bilinear interpolation."""
     return F.interpolate(
         tensor.unsqueeze(0), size=size, mode="bilinear", align_corners=False
     ).squeeze(0)
 
 
+def select_canonical_bands(arr: np.ndarray, satellite: str, band_mode: str) -> np.ndarray:
+    """
+    Select canonical slots from a normalized (N_BANDS, H, W) array.
+    Returns (n_slots, H, W). None slots become zero rows.
+    """
+    if band_mode == "12slot":
+        slot_indices = CANONICAL_BANDS_12[satellite]
+        n_slots = N_SLOTS_12
+    else:
+        slot_indices = CANONICAL_BANDS_18[satellite]
+        n_slots = N_SLOTS_18
+
+    H, W = arr.shape[1], arr.shape[2]
+    out = np.zeros((n_slots, H, W), dtype=np.float32)
+    for s, raw_idx in enumerate(slot_indices):
+        if raw_idx is not None:
+            out[s] = arr[raw_idx]
+    return out
+
+
 class PrecipDataset(Dataset):
     """
-    input_tensor  : (IN_CHANNELS, H, W)
-    target_tensor : (1, H, W)  — GPM log1p(mm/hr) resized to match H×W
+    input_tensor  : (IN_CHANNELS_12 or IN_CHANNELS_18, H, W)
+    target_tensor : (1, H, W)  -- GPM log1p(mm/hr) resized to GPM_SIZE (41x41)
+    time_feat     : (COND_DIM,) = [sin_day, cos_day, sin_hour, cos_hour, sat_0, sat_1, sat_2]
 
-    input_size: if set (e.g. (128,128)), all satellites are resized to this fixed size so
-                DataLoader can batch samples from different satellites together.
-                If None, native satellite resolution is used — batches must be same-satellite.
+    band_mode: "12slot" (39ch) or "18slot" (57ch)
+    input_size: if set (e.g. (128,128)), all satellites are resized to this fixed size
+                so DataLoader can batch samples from different satellites.
     """
 
     def __init__(self, csv_path: Path, data_dir: Path, stats: dict,
                  is_train: bool = True, transform=None,
                  input_size: tuple[int, int] | None = None,
-                 band_selection: str | None = None):
-        self.df             = pd.read_csv(csv_path)
-        self.data_dir       = Path(data_dir)
-        self.stats          = stats
-        self.is_train       = is_train
-        self.transform      = transform
-        self.input_size     = input_size  # (H, W) or None
-        self.band_selection = band_selection  # None = all 16 bands; "ir_split_window" = 3 IR bands
+                 band_mode: str = "12slot"):
+        if band_mode not in ("12slot", "18slot"):
+            raise ValueError(f"band_mode must be '12slot' or '18slot', got '{band_mode}'")
+        self.df         = pd.read_csv(csv_path)
+        self.data_dir   = Path(data_dir)
+        self.stats      = stats
+        self.is_train   = is_train
+        self.transform  = transform
+        self.input_size = input_size
+        self.band_mode  = band_mode
 
     def __len__(self):
         return len(self.df)
@@ -117,47 +172,44 @@ class PrecipDataset(Dataset):
         filenames = parse_filenames(str(row["last_30_minutes_observation_filename"]))
 
         sat_h, sat_w = SAT_SIZE[satellite]
-        out_h, out_w  = self.input_size if self.input_size else (sat_h, sat_w)
+        out_h, out_w = self.input_size if self.input_size else (sat_h, sat_w)
 
-        use_ir = self.band_selection == "ir_split_window"
-        n_out_bands = IR_BANDS_PER_FRAME if use_ir else N_BANDS
-        ir_idx = IR_SPLIT_WINDOW_BANDS[satellite] if use_ir else None
+        n_slots = N_SLOTS_12 if self.band_mode == "12slot" else N_SLOTS_18
 
         frames, masks = [], []
         for i in range(MAX_FRAMES):
             if i < len(filenames):
                 arr = read_tif(self._sat_path(satellite, filenames[i]))
                 if arr is not None:
-                    # Fix band count
+                    # Pad/trim to N_BANDS
                     if arr.shape[0] < N_BANDS:
-                        pad = np.zeros((N_BANDS - arr.shape[0], arr.shape[1], arr.shape[2]), dtype=np.float32)
+                        pad = np.zeros((N_BANDS - arr.shape[0], arr.shape[1], arr.shape[2]),
+                                       dtype=np.float32)
                         arr = np.concatenate([arr, pad], axis=0)
                     elif arr.shape[0] > N_BANDS:
                         arr = arr[:N_BANDS]
-                    # Fix spatial size (some TIFs differ from SAT_SIZE)
+                    # Fix spatial size
                     if arr.shape[1] != sat_h or arr.shape[2] != sat_w:
                         t = torch.from_numpy(arr)
                         t = F.interpolate(t.unsqueeze(0), size=(sat_h, sat_w),
                                           mode='bilinear', align_corners=False).squeeze(0)
                         arr = t.numpy()
-                    if satellite == "meteosat":
-                        arr[[12, 13]] = arr[[13, 12]]
+                    # Normalize all 16 bands using per-satellite stats
                     arr = normalize_per_band(arr, self.stats, satellite)
-                    if use_ir:
-                        arr = arr[ir_idx]  # (3, H, W)
-                    frames.append(arr)
+                    # Select canonical slots (no Meteosat swap needed)
+                    slot_arr = select_canonical_bands(arr, satellite, self.band_mode)
+                    frames.append(slot_arr)
                     masks.append(np.ones((1, sat_h, sat_w), dtype=np.float32))
                 else:
-                    frames.append(np.zeros((n_out_bands, sat_h, sat_w), dtype=np.float32))
+                    frames.append(np.zeros((n_slots, sat_h, sat_w), dtype=np.float32))
                     masks.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
             else:
-                frames.append(np.zeros((n_out_bands, sat_h, sat_w), dtype=np.float32))
+                frames.append(np.zeros((n_slots, sat_h, sat_w), dtype=np.float32))
                 masks.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
 
         input_tensor = torch.from_numpy(np.concatenate(frames + masks, axis=0))
-        # shape: (IN_CHANNELS, sat_h, sat_w)
+        # shape: (n_slots*3 + 3, sat_h, sat_w)
 
-        # Resize to target output size if specified (needed to batch mixed satellites)
         if self.input_size and (sat_h, sat_w) != (out_h, out_w):
             input_tensor = resize_to(input_tensor, (out_h, out_w))
 
@@ -183,11 +235,15 @@ class PrecipDataset(Dataset):
         dt   = pd.to_datetime(row["datetime"])
         day  = dt.day_of_year
         hour = dt.hour
+        sat_oh = SAT_ONEHOT[satellite]
         time_feat = torch.tensor([
             math.sin(2 * math.pi * day / 365),
             math.cos(2 * math.pi * day / 365),
             math.sin(2 * math.pi * hour / 24),
             math.cos(2 * math.pi * hour / 24),
+            sat_oh[0],
+            sat_oh[1],
+            sat_oh[2],
         ], dtype=torch.float32)
 
         return input_tensor, target_tensor, row["unique_id"], time_feat

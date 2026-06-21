@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 from dataset import (PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR,
-                     GPM_SIZE, IN_CHANNELS, IR_CHANNELS)
+                     GPM_SIZE, IN_CHANNELS_12, IN_CHANNELS_18, COND_DIM)
 from model import build_model
 
 
@@ -304,20 +304,20 @@ def stratified_sample(train_idx: list, rain_labels: dict, seed: int = 42) -> lis
 def save_experiment(args, best_val_rmse: float, epochs_run: int):
     log_path = Path("experiments.csv")
     fieldnames = ["run_name", "datetime", "epochs_run", "best_val_rmse",
-                  "lr", "batch_size", "encoder", "loss_type", "band_selection",
+                  "lr", "batch_size", "encoder", "loss_type", "band_mode",
                   "lb_score", "notes"]
     row = {
-        "run_name":       args.run_name,
-        "datetime":       datetime.now().strftime("%Y-%m-%d %H:%M"),
-        "epochs_run":     epochs_run,
-        "best_val_rmse":  f"{best_val_rmse:.4f}",
-        "lr":             args.lr,
-        "batch_size":     args.batch_size,
-        "encoder":        args.encoder,
-        "loss_type":      args.loss_type,
-        "band_selection": getattr(args, "band_selection", "all"),
-        "lb_score":       "",
-        "notes":          "",
+        "run_name":    args.run_name,
+        "datetime":    datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "epochs_run":  epochs_run,
+        "best_val_rmse": f"{best_val_rmse:.4f}",
+        "lr":          args.lr,
+        "batch_size":  args.batch_size,
+        "encoder":     args.encoder,
+        "loss_type":   args.loss_type,
+        "band_mode":   args.band_mode,
+        "lb_score":    "",
+        "notes":       "",
     }
     write_header = not log_path.exists()
     with open(log_path, "a", newline="") as f:
@@ -355,9 +355,6 @@ def train(args):
     # 2. Dataset
     from tqdm import tqdm
     print("Loading dataset...")
-    band_selection = getattr(args, "band_selection", "all")
-    if band_selection == "all":
-        band_selection = None
     input_size = (args.input_size, args.input_size) if args.input_size else None
     full_ds = PrecipDataset(
         csv_path=Path(args.csv_train),
@@ -365,7 +362,7 @@ def train(args):
         stats=stats,
         is_train=True,
         input_size=input_size,
-        band_selection=band_selection,
+        band_mode=args.band_mode,
     )
     if args.val_mode == "holdout":
         holdout_locs = [s.strip() for s in args.holdout_locations.split(",")]
@@ -385,10 +382,11 @@ def train(args):
     # 3. Model + Loss
     use_focal = (args.loss_type == "focal")
     num_classes = NUM_BINS if use_focal else 1
-    in_channels = IR_CHANNELS if band_selection == "ir_split_window" else IN_CHANNELS
-    print(f"Building model (in_channels={in_channels}, num_classes={num_classes})...")
+    in_channels = IN_CHANNELS_18 if args.band_mode == "18slot" else IN_CHANNELS_12
+    print(f"Building model (band_mode={args.band_mode}, in_channels={in_channels}, "
+          f"cond_dim={COND_DIM}, num_classes={num_classes})...")
     model = build_model(encoder_name=args.encoder, num_classes=num_classes,
-                        in_channels=in_channels).to(device)
+                        in_channels=in_channels, cond_dim=COND_DIM).to(device)
     print("Model ready.")
 
     if use_focal:
@@ -532,9 +530,10 @@ if __name__ == "__main__":
                         help="Max rows for stats computation (0=all). Use ~300 for smoke test.")
     parser.add_argument("--early_stop_patience", type=int, default=30,
                         help="Stop training if val RMSE does not improve for this many epochs.")
-    parser.add_argument("--band_selection", default="all",
-                        choices=["all", "ir_split_window"],
-                        help="all: 51ch (16 bands x 3 frames + masks); ir_split_window: 12ch IR only.")
+    parser.add_argument("--band_mode", default="12slot",
+                        choices=["12slot", "18slot"],
+                        help="12slot: 39ch canonical (12 wavelengths x 3 frames + masks); "
+                             "18slot: 57ch canonical (18 wavelengths, zero-pad missing).")
     parser.add_argument("--loss_type", default="combined",
                         help="focal: FocalLossIMERG (14 dynamic log-bins); combined: 0.7*MSE+0.3*MAE regression.")
     parser.add_argument("--gamma", type=float, default=2.0,

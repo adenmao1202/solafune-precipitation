@@ -1,38 +1,38 @@
 import segmentation_models_pytorch as smp
 import torch
 import torch.nn as nn
-from dataset import IN_CHANNELS
+from dataset import IN_CHANNELS_12, COND_DIM
 
 
 class FiLMLayer(nn.Module):
-    """Modulates bottleneck features with time encoding (day + hour sin/cos).
+    """Modulates bottleneck features with time+satellite conditioning.
     Zero-initialized so it acts as identity at the start of training."""
-    def __init__(self, time_dim: int, feature_channels: int):
+    def __init__(self, cond_dim: int, feature_channels: int):
         super().__init__()
-        self.gamma_fc = nn.Linear(time_dim, feature_channels)
-        self.beta_fc  = nn.Linear(time_dim, feature_channels)
+        self.gamma_fc = nn.Linear(cond_dim, feature_channels)
+        self.beta_fc  = nn.Linear(cond_dim, feature_channels)
         nn.init.zeros_(self.gamma_fc.weight)
         nn.init.zeros_(self.gamma_fc.bias)
         nn.init.zeros_(self.beta_fc.weight)
         nn.init.zeros_(self.beta_fc.bias)
 
-    def forward(self, features: torch.Tensor, time_feat: torch.Tensor) -> torch.Tensor:
-        gamma = self.gamma_fc(time_feat)[:, :, None, None]
-        beta  = self.beta_fc(time_feat)[:, :, None, None]
+    def forward(self, features: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        gamma = self.gamma_fc(cond)[:, :, None, None]
+        beta  = self.beta_fc(cond)[:, :, None, None]
         return features * (1 + gamma) + beta
 
 
 class PrecipUNet(smp.Unet):
-    def __init__(self, time_dim: int = 4, **kwargs):
+    def __init__(self, cond_dim: int = COND_DIM, **kwargs):
         super().__init__(**kwargs)
         bottleneck_ch = self.encoder.out_channels[-1]
-        self.film = FiLMLayer(time_dim=time_dim, feature_channels=bottleneck_ch)
+        self.film = FiLMLayer(cond_dim=cond_dim, feature_channels=bottleneck_ch)
         for block in self.decoder.blocks:
             block.conv1 = nn.Sequential(block.conv1, nn.Dropout2d(p=0.2))
 
-    def forward(self, x: torch.Tensor, time_feat: torch.Tensor) -> torch.Tensor:
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
         features = list(self.encoder(x))
-        features[-1] = self.film(features[-1], time_feat)
+        features[-1] = self.film(features[-1], cond)
         decoder_output = self.decoder(features)
         return self.segmentation_head(decoder_output)
 
@@ -40,21 +40,23 @@ class PrecipUNet(smp.Unet):
 def build_model(encoder_name: str = "efficientnet-b4",
                 encoder_weights: str = "imagenet",
                 num_classes: int = 1,
-                in_channels: int | None = None) -> nn.Module:
+                in_channels: int | None = None,
+                cond_dim: int = COND_DIM) -> nn.Module:
     """
-    UNet with EfficientNet-B4 encoder + FiLM time conditioning.
+    UNet with EfficientNet-B4 encoder + FiLM conditioning.
 
-    FiLM injects day-of-year and hour-of-day (sin/cos) into the bottleneck,
-    allowing the model to learn seasonal and diurnal precipitation patterns.
-    Based on NPM paper ablation: day encoding alone = +17% CSI.
+    FiLM injects [sin/cos day, sin/cos hour, satellite one-hot (3)] into the
+    bottleneck, letting the model learn seasonal, diurnal, and per-satellite
+    precipitation patterns.
 
-    encoder_weights="imagenet": front 3ch get ImageNet prior.
-    in_channels: defaults to IN_CHANNELS (51). Pass IR_CHANNELS (12) for IR-only mode.
+    in_channels: defaults to IN_CHANNELS_12 (39ch). Pass IN_CHANNELS_18 (57ch)
+                 for 18-slot canonical mapping.
+    cond_dim: defaults to COND_DIM (7). Must match dataset output.
     """
     if in_channels is None:
-        in_channels = IN_CHANNELS
+        in_channels = IN_CHANNELS_12
     model = PrecipUNet(
-        time_dim=4,
+        cond_dim=cond_dim,
         encoder_name=encoder_name,
         encoder_weights=encoder_weights,
         in_channels=in_channels,
@@ -63,5 +65,4 @@ def build_model(encoder_name: str = "efficientnet-b4",
         decoder_use_batchnorm=True,
         decoder_attention_type=None,
     )
-
     return model

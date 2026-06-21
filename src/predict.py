@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from dataset import PrecipDataset, get_device, GPM_SIZE, IN_CHANNELS, IR_CHANNELS
+from dataset import PrecipDataset, get_device, GPM_SIZE, IN_CHANNELS_12, IN_CHANNELS_18, COND_DIM
 from model import build_model
 
 
@@ -33,7 +33,6 @@ def predict(args):
     with open(Path(args.data_dir) / "stats.json") as f:
         stats = json.load(f)
 
-    band_selection = args.band_selection if args.band_selection != "all" else None
     input_size = (args.input_size, args.input_size) if args.input_size else None
     test_ds = PrecipDataset(
         csv_path=Path(args.csv_test),
@@ -41,12 +40,12 @@ def predict(args):
         stats=stats,
         is_train=False,
         input_size=input_size,
-        band_selection=band_selection,
+        band_mode=args.band_mode,
     )
     loader = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=4)
 
     use_focal = (args.loss_type == "focal")
-    in_channels = IR_CHANNELS if band_selection == "ir_split_window" else IN_CHANNELS
+    in_channels = IN_CHANNELS_18 if args.band_mode == "18slot" else IN_CHANNELS_12
 
     if use_focal:
         focal_cfg_path = Path(args.model_path).parent / "focal_config.json"
@@ -63,7 +62,8 @@ def predict(args):
         num_classes = 1
         bin_center_t = None
 
-    model = build_model(num_classes=num_classes, in_channels=in_channels)
+    model = build_model(num_classes=num_classes, in_channels=in_channels, cond_dim=COND_DIM)
+
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.to(device).eval()
 
@@ -141,7 +141,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path",     default=None)
     parser.add_argument("--out_dir",        default=None)
     parser.add_argument("--input_size",     type=int, default=None)
-    parser.add_argument("--band_selection", default=None, choices=["all", "ir_split_window"])
+    parser.add_argument("--band_mode", default=None, choices=["12slot", "18slot"])
     parser.add_argument("--loss_type",      default=None)
     args = parser.parse_args()
 
@@ -159,12 +159,12 @@ if __name__ == "__main__":
             args.out_dir = str(run_dir / "submission")
         if args.input_size is None:
             args.input_size = train_args.get("input_size", 128)
-        if args.band_selection is None:
-            args.band_selection = train_args.get("band_selection", "all")
+        if args.band_mode is None:
+            args.band_mode = train_args.get("band_mode", "12slot")
         if args.loss_type is None:
             args.loss_type = train_args.get("loss_type", "combined")
         print(f"Loaded from {args_path}:")
-        print(f"  loss_type={args.loss_type}  band_selection={args.band_selection}  "
+        print(f"  loss_type={args.loss_type}  band_mode={args.band_mode}  "
               f"input_size={args.input_size}")
         print(f"  model_path={args.model_path}")
     else:
@@ -175,8 +175,8 @@ if __name__ == "__main__":
             args.out_dir = "./submission"
         if args.input_size is None:
             args.input_size = 128
-        if args.band_selection is None:
-            args.band_selection = "all"
+        if args.band_mode is None:
+            args.band_mode = "12slot"
         if args.loss_type is None:
             args.loss_type = "combined"
 
