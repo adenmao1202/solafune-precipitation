@@ -432,7 +432,7 @@ def train(args):
         # --- Train ---
         model.train()
         train_loss = 0.0
-        train_bar = tqdm(train_loader, desc=f"Epoch {epoch:03d} [train]", leave=False, dynamic_ncols=True)
+        train_bar = tqdm(train_loader, desc=f"Epoch {epoch:03d} [train]", leave=True, dynamic_ncols=True, position=0)
         for inputs, targets, _, time_feat in train_bar:
             inputs, targets = inputs.to(device), targets.to(device)
             time_feat = time_feat.to(device)
@@ -456,7 +456,7 @@ def train(args):
         sq_errors = []
         sq_errors_rain = []
         with torch.no_grad():
-            val_bar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [val]  ", leave=False, dynamic_ncols=True)
+            val_bar = tqdm(val_loader, desc=f"Epoch {epoch:03d} [val]  ", leave=True, dynamic_ncols=True, position=1)
             for inputs, targets, _, time_feat in val_bar:
                 inputs, targets = inputs.to(device), targets.to(device)
                 time_feat = time_feat.to(device)
@@ -482,7 +482,7 @@ def train(args):
         avg_train = train_loss / len(train_loader)
         scheduler.step(val_rmse)
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f} | val_RMSE_rain={val_rmse_rain:.4f} | lr={current_lr:.2e}")
+        tqdm.write(f"Epoch {epoch:03d} | train_loss={avg_train:.4f} | val_RMSE={val_rmse:.4f} | val_RMSE_rain={val_rmse_rain:.4f} | lr={current_lr:.2e}")
 
         # Per-epoch history CSV
         history_path = run_dir / "history.csv"
@@ -510,15 +510,15 @@ def train(args):
                 "best_val_rmse": best_val_rmse,
             }, run_dir / "checkpoint.pth")
             ema.restore(model)
-            print(f"  -> Saved best model (RMSE={best_val_rmse:.4f})")
+            tqdm.write(f"  -> Saved best model (RMSE={best_val_rmse:.4f})")
         else:
             patience_counter += 1
-            print(f"  -> No improvement ({patience_counter}/{args.early_stop_patience})")
+            tqdm.write(f"  -> No improvement ({patience_counter}/{args.early_stop_patience})")
             if patience_counter >= args.early_stop_patience:
-                print(f"\nEarly stopping at epoch {epoch}.")
+                tqdm.write(f"\nEarly stopping at epoch {epoch}.")
                 break
 
-    print(f"\nTraining done. Best val RMSE: {best_val_rmse:.4f}")
+    tqdm.write(f"\nTraining done. Best val RMSE: {best_val_rmse:.4f}")
     save_experiment(args, best_val_rmse, epochs_run)
 
 
