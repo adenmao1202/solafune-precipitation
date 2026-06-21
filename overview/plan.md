@@ -11,7 +11,14 @@
 |-----|----------------|---------|------|---------|
 | v1 | ~0.70 (random split, leakage) | 0.7300 | 13 | baseline |
 | v2 | 1.1563 (temporal split) | 0.7196 | 11 | temporal split, epochs=60 |
-| v3 | 進行中 | - | - | target clamp, ReduceLROnPlateau, Dropout |
+| v3 | 1.1613 | 0.7028 | 8 | target clamp, ReduceLROnPlateau, Dropout |
+| v4 | 1.2294 (worse than v3, ep6 停滯) | 待 submit | - | imagenet weights + WeightedMSE(alpha=5) |
+
+**v4 問題分析：**
+- Val RMSE 比 v3 差（1.22 vs 1.16），兩個改動同時上，不確定哪個出問題
+- 嫌疑 1：WeightedMSE alpha=5 太激進，模型過度聚焦有雨 pixel，整體 RMSE 反升
+- 嫌疑 2：imagenet 51ch 適應需要更多 epoch
+- 下一步：單獨測試，先試 imagenet only（不加 WeightedMSE），或把 alpha 降到 2.0
 
 - Vast.ai instance C.41303819 正在跑 v3
 - GitHub repo：https://github.com/adenmao1202/solafune-precipitation（public）
@@ -75,7 +82,7 @@ scp -P <port> root@<ip>:~/solafune/solafune-precipitation/submission.zip ~/Deskt
 
 每次只改一件事，submit 前確認 local val RMSE 有改善。
 
-### [DONE - v4] P2-0. ImageNet 預訓練權重（1 行改動）
+### [DONE - v4, 待驗證] P2-0. ImageNet 預訓練權重（1 行改動）
 ```python
 # model.py
 encoder_weights="imagenet"  # 原本是 None
@@ -83,7 +90,7 @@ encoder_weights="imagenet"  # 原本是 None
 - 從零訓練 -> 用 ImageNet 初始化，通常單項最大提升
 - 比賽規則允許（Apache 2.0）
 
-### [DONE - v4] P2-1. Weighted MSE loss
+### [DONE - v4, 待驗證] P2-1. Weighted MSE loss
 ```python
 weight = 1.0 + 5.0 * (target > 0).float()
 loss = (weight * (pred - target) ** 2).mean()

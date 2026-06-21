@@ -25,3 +25,9 @@ submission.zip
 # Logs
 *.log
 wandb/
+baseline/
+paper/
+resource/
+runs/
+*.pdf
+*.zip

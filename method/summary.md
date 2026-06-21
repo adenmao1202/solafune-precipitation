@@ -1,6 +1,6 @@
 # Solafune 降水預測競賽：實驗策略全流程
 
-整理日期：2026-06-20（v10 失敗後更新）
+整理日期：2026-06-20（v11_baseline 進行中）
 
 ---
 
@@ -26,19 +26,31 @@
 - Augmentation: 無
 - EMA: 無
 
-### 目前 Code 狀態（HEAD: ad03faa，2026-06-20）
+### 目前 Code 狀態（HEAD: 63daa12，2026-06-20）
 
-v10 系列在 v8a 基礎上改動，目前 code 的實際狀態：
+| 項目 | 目前 code | 狀態 |
+|------|-----------|------|
+| Loss default | combined（0.7*MSE+0.3*MAE） | 已修 |
+| Scheduler | ReduceLROnPlateau(patience=5, factor=0.5) | 已修 |
+| Flip aug | H-flip only（V-flip 已移除） | 已修 |
+| EMA decay | 0.999（預設） | 已修 |
+| Val 模式 | --val_mode temporal（預設）/ holdout | 已加 |
+| Holdout 地點 | --holdout_locations florida,france,jakarta,kinshasa（預設） | 已加 |
+| FocalLossIMERG class | 仍在 train.py（--loss_type focal 可啟動） | 保留備用 |
 
-| 項目 | 目前 code | v11 計劃目標 | 是否已修 |
-|------|-----------|------------|--------|
-| Loss default | combined（ad03faa 剛改） | combined | 已修 |
-| Scheduler | **OneCycleLR(max_lr=1e-3)**（80dd257 改入） | ReduceLROnPlateau(patience=5) | **未修** |
-| Flip aug | **H-flip + V-flip 都在**（dataset.py） | H-flip only，移除 V-flip | **未修** |
-| EMA | **decay=0.995**（80dd257 改入） | decay=0.999 | **未修** |
-| FocalLossIMERG class | 仍在 train.py（可用 --loss_type focal 啟動） | 保留，待乾淨測試 | -- |
+### v11_baseline 訓練結果（DONE - 失敗，2026-06-20）
 
-> **結論：** v11 的 code 目前只修了 loss default，scheduler / V-flip / EMA decay 三個問題還未在 code 裡修正，需要在開下一個 instance 前先 fix + push。
+- 設定: batch_size=64, num_workers=32, ema_decay=0.999, scheduler_patience=5, val_mode=temporal
+- Best val RMSE: **1.2602**（epoch 12）
+- 之後震盪：epoch 13-27 卡在 1.28-1.33，LR 降至 2.5e-5 仍無改善
+- 結論：EMA(0.999) + H-flip 無法回到 v8a 的 1.1441，策略需重新思考
+
+### v11_holdout 訓練中（2026-06-20）
+
+- 設定: batch_size=64, num_workers=32, ema_decay=0.999, **val_mode=holdout**
+- Val 地點: florida, france, jakarta, kinshasa（16 train locs / 4 val locs）
+- 目的：確認 location holdout val 是否讓 val/LB 比值從 1.63x 縮小到接近 BL2 的 1.23x
+- 參考：method/baseline_summary.md（BL2 分析）
 
 ### 已知失敗實驗
 
@@ -49,6 +61,8 @@ v10 系列在 v8a 基礎上改動，目前 code 的實際狀態：
 | v6 | stratified sampling + TieredWeightedLoss | 失敗 | 雙重過度矯正：sampling 和 loss 同時放大有雨梯度，互相疊加導致不穩定 |
 | **v10_focal** [DONE - 失敗] | Focal Loss（10 log-bins, gamma=2） + **OneCycleLR**（原本計劃是 CosineWarmRestarts，commit 80dd257 換成 OneCycleLR） + EMA(0.995) + H/V-flip + batch=32（RTX 3060） | 最差一次（>v8a 大幅倒退） | 四個原因見下方「v10 失敗根因分析」 |
 | **v10_regression** [DONE - 失敗] | 把 Focal 換回 combined loss（commit ad03faa），**OneCycleLR / H/V-flip / EMA 0.995 都未改** | 無法到 1.3 以下 | **主因：OneCycleLR max_lr=1e-3 對 pretrained EfficientNet-B4 太激進，破壞 ImageNet prior；Focal 只是次要因素** |
+| **v11_baseline** [DONE - 失敗] | ReduceLROnPlateau(p=5) + H-flip only + EMA(0.999) + combined loss，batch=64，temporal split | best 1.2602（epoch 12），卡在 1.26-1.33 | EMA + H-flip 無法回到 v8a 的 1.14；天花板 ~1.26；策略需重新思考 |
+| **v11_holdout** [進行中] | 同 v11_baseline，但 val_mode=holdout（florida/france/jakarta/kinshasa） | 進行中 | 測試 location holdout 是否讓 val 數字更接近 LB（目標 val/LB 從 1.63x 縮小到 1.23x） |
 
 ---
 
@@ -399,17 +413,21 @@ v8a 現況（LB 0.6979, val 1.1441）
       根因：OneCycleLR 太激進 + V-flip 語意矛盾 + Focal bin 精度 floor
            |
            v
- +--> [v11 - 下一步] 先恢復 baseline：
-      ReduceLROnPlateau(patience=5) + H-flip only + EMA(0.999) + combined loss
-      目標：確認 val RMSE 回到 ~1.14（v8a 水準）
+ +--> [DONE - 失敗] v11_baseline：
+      ReduceLROnPlateau(patience=5) + H-flip only + EMA(0.999) + combined loss，batch=64
+      best val RMSE = 1.2602（epoch 12），之後卡在 1.28-1.33 震盪，LR 降到 2.5e-5 仍無改善
+      結論：EMA(0.999) + H-flip 組合無法回到 v8a 的 1.14，天花板約 1.26
            |
-           +--> val 回到 ~1.14 -> 確認 OneCycleLR 是主因
-           |       |
-           |       +--> 單獨測試 Focal Loss（在穩定 baseline 上加）
-           |       |       +--> FL 有效 -> 提交 LB
-           |       |       +--> FL 無效 -> Ensemble（3-5 seeds，baseline 框架）
-           |
-           +--> val 仍 >1.3 -> 還有其他未知問題，需要進一步診斷
+           v
+ +--> [待討論] 策略需要重新思考：
+      - EMA + H-flip 對這個任務可能中性甚至略有害
+      - BL2 baseline（無 EMA、無 flip、9ch IR）LB 0.708 vs 我們 0.698
+      - 參考 method/baseline_summary.md：val 方式（temporal vs location-grouped）
+        可能是 val/LB 差距過大（1.63x vs BL2 的 1.23x）的根本原因
+      可能方向：
+        A. 換 val 方式為 location-grouped holdout（讓 val 更誠實）
+        B. 縮減輸入到純 IR bands（去除 visible 雜訊）
+        C. 回到完全複製 v8a（無 EMA、無 flip）確認是否能重現 1.14
 ```
 
 ---
