@@ -109,3 +109,77 @@ pred[pred < threshold] = 0.0  # threshold ~ 0.05~0.2 mm/hr
 若比值縮小到 1.1x（holdout 更誠實），預期 LB = 0.9036 / 1.1 = 0.821（更差）。
 
 **重點：submit 後才知道方向，先 submit。**
+
+---
+
+## EDA / Data Validation 驗證結果（src/eda.ipynb + src/data_validation.ipynb）
+
+### 1. 資料集基本統計（已驗證）
+
+| 項目 | 數值 |
+|------|------|
+| 訓練樣本總數 | 40,686 筆 |
+| Himawari | 13,192 筆 |
+| GOES | 10,272 筆 |
+| Meteosat | 17,222 筆 |
+| 時間範圍 | 2023-01-01 ~ 2026-01-31 |
+| GPM 零值比例（100 sample EDA） | 80.33% |
+| GPM 零值比例（全訓練集掃描） | 83.99% ← 100 sample 取樣偏差，以全集為準 |
+| GPM mean | 0.335 mm/hr |
+| GPM 99th pct | 7.4 mm/hr |
+| GPM max（100 samples） | 39.96 mm/hr |
+| GPM max（全訓練集） | **96.51 mm/hr** ← EDA 取樣太少沒看到真正極端值 |
+
+### 2. 影像尺寸（已驗證，與 dataset.py 一致）
+
+| 衛星 | 影像 HxW | GPM HxW | 比值 |
+|------|---------|---------|------|
+| Himawari | 81x81 | 41x41 | ~2x |
+| GOES | 141x141 | 41x41 | ~3.4x |
+| Meteosat | 144x144 | 41x41 | ~3.5x |
+
+CRS=None（無地理投影），資料已預先空間對齊，不需要 reproject。
+dataset.py 的 SAT_SIZE 常數正確。
+
+### 3. Frame 數量分布（已驗證）
+
+| Frames | 筆數 | 比例 |
+|--------|------|------|
+| 3 frames | 39,796 | 97.8% |
+| 2 frames | 647 | 1.6% |
+| 1 frame | 8 | 0.02% |
+| 0 frames | 235 | 0.6% |
+
+0 frames 的樣本用 zero padding + zero mask 處理，dataset.py 已正確實作。
+
+### 4. 夜間 VIS 波段（已驗證）
+
+夜間 VIS = **0（不是 NaN）**，z-score 後變成負值，不需要特殊 mask 處理。
+Meteosat VIS 夜間零值比例 64~82%（最嚴重），Himawari 約 0~29%，GOES 約 0~1%。
+mask channel（每 frame 一個）已記錄有效性，model 可自行學習夜間特性。
+
+### 5. Band 物理波長對照（已驗證）
+
+跨衛星的對應關係（0-based index）：
+
+| 類型 | Himawari | GOES | Meteosat（swap 前） | Meteosat（swap 後） |
+|------|---------|------|-------------------|-------------------|
+| WV 6.2um | idx 7 (B08) | idx 7 (C08) | idx 9 (wv_63) | idx 9 (wv_63) |
+| IR 10.4um | idx 12 (B13) | idx 12 (C13) | idx 13 (ir_105) | **idx 12** |
+| IR 12.3um | idx 14 (B15) | idx 14 (C15) | idx 14 (ir_123) | idx 14 (ir_123) |
+
+Meteosat band swap（arr[[12,13]] = arr[[13,12]]）後：
+- idx 12 = ir_105（10.5um，雲頂溫度）
+- idx 13 = ir_97（9.66um）
+
+**IR_SPLIT_WINDOW_BANDS = {himawari:[7,12,14], goes:[7,12,14], meteosat:[9,12,14]}** 已驗證正確。
+
+### 6. 重要發現：EDA 取樣不足導致的偏差
+
+| 項目 | EDA（100 samples） | 全集掃描 |
+|------|------------------|---------|
+| 零值比例 | 80.33% | 83.99% |
+| max precipitation | 39.96 mm/hr | 96.51 mm/hr |
+
+100 sample EDA 沒看到真正的極端降水事件。全集掃描的數字才可靠。
+這也解釋了為什麼固定 bin edge 上限設 26mm/hr 是錯的——真實 max 是 96mm/hr。
