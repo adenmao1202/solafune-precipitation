@@ -27,6 +27,13 @@ from dataset import PrecipDataset, get_device, GPM_SIZE, IN_CHANNELS_12, IN_CHAN
 from model import build_model
 
 
+def center_crop_to_gpm(t: torch.Tensor) -> torch.Tensor:
+    """Center-crop U-Net output to GPM_SIZE without interpolation."""
+    top  = (t.shape[-2] - GPM_SIZE[0]) // 2
+    left = (t.shape[-1] - GPM_SIZE[1]) // 2
+    return t[:, :, top:top + GPM_SIZE[0], left:left + GPM_SIZE[1]]
+
+
 def predict(args):
     device = get_device()
 
@@ -89,10 +96,8 @@ def predict(args):
             inputs    = inputs.to(device)
             time_feat = time_feat.to(device)
             preds = model(inputs, time_feat)
-            # Resize to GPM_SIZE (41×41) for submission
-            preds = F.interpolate(
-                preds, size=GPM_SIZE, mode="bilinear", align_corners=False
-            )
+            # Center-crop to GPM_SIZE (41×41) — no interpolation
+            preds = center_crop_to_gpm(preds)
             if use_focal:
                 assert bin_center_t is not None
                 probs = F.softmax(preds.float(), dim=1)

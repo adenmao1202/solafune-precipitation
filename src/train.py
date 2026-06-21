@@ -23,6 +23,13 @@ from dataset import (PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDI
 from model import build_model
 
 
+def center_crop_to_gpm(t: torch.Tensor) -> torch.Tensor:
+    """Center-crop U-Net output to GPM_SIZE without interpolation."""
+    top  = (t.shape[-2] - GPM_SIZE[0]) // 2
+    left = (t.shape[-1] - GPM_SIZE[1]) // 2
+    return t[:, :, top:top + GPM_SIZE[0], left:left + GPM_SIZE[1]]
+
+
 def temporal_split(csv_path: Path, val_ratio: float = 0.2):
     """每個地點按時間排序，取最後 val_ratio 為 val，避免 data leakage。"""
     df = pd.read_csv(csv_path)
@@ -432,7 +439,7 @@ def train(args):
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 preds = model(inputs, time_feat)
-                preds_41 = F.interpolate(preds, size=GPM_SIZE, mode="bilinear", align_corners=False)
+                preds_41 = center_crop_to_gpm(preds)
                 loss  = criterion(preds_41, targets)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
@@ -457,11 +464,11 @@ def train(args):
                     preds = model(inputs, time_feat)
                 targets_real = torch.expm1(targets.float().clamp(0, 8))
                 if use_focal:
-                    preds_41 = F.interpolate(preds.float(), size=GPM_SIZE, mode="bilinear", align_corners=False)
+                    preds_41 = center_crop_to_gpm(preds.float())
                     probs    = F.softmax(preds_41, dim=1)
                     pred_mm  = (probs * bin_center_t).sum(dim=1, keepdim=True)
                 else:
-                    preds_41 = F.interpolate(preds.float(), size=GPM_SIZE, mode="bilinear", align_corners=False)
+                    preds_41 = center_crop_to_gpm(preds.float())
                     pred_mm = torch.expm1(preds_41.clamp(0, 8))
                 sq = (pred_mm - targets_real) ** 2
                 sq_errors.append(sq[torch.isfinite(sq)].cpu().numpy().ravel())
