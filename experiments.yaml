@@ -17,6 +17,7 @@ defaults:
   holdout_locations: "florida,jakarta,cape_town,friuli_venezia_giulia"
   encoder: efficientnet-b4
   band_mode: 12slot
+  stats_max_samples: 2000
 
 experiments:
   # v14a: 48x48 input + center crop (bottleneck 2x2)
