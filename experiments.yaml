@@ -5,27 +5,22 @@
 defaults:
   data_dir: ~/solafune/data
   csv_train: ~/solafune/data/train_dataset.csv
-  epochs: 40
+  epochs: 60
   batch_size: 32
   num_workers: 4
-  input_size: 96
+  input_size: 128
   lr: 1.0e-4
   ema_decay: 0.999
   scheduler_patience: 5
-  early_stop_patience: 15
+  early_stop_patience: 20
   val_mode: holdout
   holdout_locations: "florida,jakarta,cape_town,friuli_venezia_giulia"
   encoder: efficientnet-b4
-  band_mode: 12slot
+  band_mode: 12slot+diff
+  loss_type: dual_head
   stats_max_samples: 2000
 
 experiments:
-  # v14a: 48x48 input + center crop (bottleneck 2x2)
-  # Test whether removing F.interpolate fixes val_RMSE_rain stuck at 2.2~2.4
-  - run_name: v14_48px_crop
-    input_size: 48
-
-  # v14b: 96x96 input + center crop (bottleneck 3x3) — recommended
-  # More spatial context than 48x48, still no interpolation artifact
-  - run_name: v14_96px_crop
-    input_size: 96
+  # v15: dual-head CB+BCE loss + 12slot+diff (temporal cooling rate)
+  # Direct attack on heavy rain tail; see next.md for full rationale
+  - run_name: v15_dual_head_cb

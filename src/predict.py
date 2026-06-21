@@ -23,7 +23,7 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader
 
-from dataset import PrecipDataset, get_device, GPM_SIZE, IN_CHANNELS_12, IN_CHANNELS_18, COND_DIM
+from dataset import PrecipDataset, get_device, GPM_SIZE, IN_CHANNELS_12, IN_CHANNELS_18, IN_CHANNELS_12DIFF, COND_DIM
 from model import build_model
 
 
@@ -52,7 +52,13 @@ def predict(args):
     loader = DataLoader(test_ds, batch_size=32, shuffle=False, num_workers=4)
 
     use_focal = (args.loss_type == "focal")
-    in_channels = IN_CHANNELS_18 if args.band_mode == "18slot" else IN_CHANNELS_12
+    use_dual  = (args.loss_type == "dual_head")
+    if args.band_mode == "18slot":
+        in_channels = IN_CHANNELS_18
+    elif args.band_mode == "12slot+diff":
+        in_channels = IN_CHANNELS_12DIFF
+    else:
+        in_channels = IN_CHANNELS_12
 
     if use_focal:
         focal_cfg_path = Path(args.model_path).parent / "focal_config.json"
@@ -69,7 +75,8 @@ def predict(args):
         num_classes = 1
         bin_center_t = None
 
-    model = build_model(num_classes=num_classes, in_channels=in_channels, cond_dim=COND_DIM)
+    model = build_model(num_classes=num_classes, in_channels=in_channels, cond_dim=COND_DIM,
+                        use_dual_head=use_dual)
 
     model.load_state_dict(torch.load(args.model_path, map_location=device))
     model.to(device).eval()
@@ -90,14 +97,25 @@ def predict(args):
 
     result_rows = []
 
+    def run_model(x, cond):
+        """Run model with TTA (H-flip average), return intensity tensor."""
+        out_a = model(x, cond)
+        out_b = model(x.flip(-1), cond)
+        if isinstance(out_a, dict):
+            int_a = out_a["intensity"]
+            int_b = out_b["intensity"].flip(-1)
+        else:
+            int_a = out_a
+            int_b = out_b.flip(-1)
+        return (int_a + int_b) / 2
+
     from tqdm import tqdm
     with torch.no_grad():
         for inputs, _, unique_ids, time_feat in tqdm(loader, desc="Predicting"):
             inputs    = inputs.to(device)
             time_feat = time_feat.to(device)
-            preds = model(inputs, time_feat)
-            # Center-crop to GPM_SIZE (41×41) — no interpolation
-            preds = center_crop_to_gpm(preds)
+            preds = run_model(inputs, time_feat)
+            preds = F.interpolate(preds, size=GPM_SIZE, mode="bilinear", align_corners=False)
             if use_focal:
                 assert bin_center_t is not None
                 probs = F.softmax(preds.float(), dim=1)
@@ -146,7 +164,7 @@ if __name__ == "__main__":
     parser.add_argument("--model_path",     default=None)
     parser.add_argument("--out_dir",        default=None)
     parser.add_argument("--input_size",     type=int, default=None)
-    parser.add_argument("--band_mode", default=None, choices=["12slot", "18slot"])
+    parser.add_argument("--band_mode", default=None, choices=["12slot", "18slot", "12slot+diff"])
     parser.add_argument("--loss_type",      default=None)
     args = parser.parse_args()
 

@@ -19,7 +19,7 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Subset
 
 from dataset import (PrecipDataset, get_device, parse_filenames, SATELLITE_SUBDIR,
-                     GPM_SIZE, IN_CHANNELS_12, IN_CHANNELS_18, COND_DIM)
+                     GPM_SIZE, IN_CHANNELS_12, IN_CHANNELS_18, IN_CHANNELS_12DIFF, COND_DIM)
 from model import build_model
 
 
@@ -157,6 +157,52 @@ class CombinedLoss(nn.Module):
         mse = ((pred - target) ** 2).mean()
         mae = (pred - target).abs().mean()
         return 0.7 * mse + 0.3 * mae  # v8a setting
+
+
+class AdaptedCBLoss(nn.Module):
+    """Class-Balanced loss: intensity-weighted MSE+MAE in log1p space.
+    Weights computed from mm/hr ground truth so heavy rain gets 50x gradient."""
+    NODES_MM = [0.5, 2.0, 6.0, 10.0, 18.0, 30.0]
+    WEIGHTS  = [1,   2,   5,   10,   20,   30,  50]
+
+    def __init__(self, beta: float = 0.1):
+        super().__init__()
+        self.beta = beta
+
+    def forward(self, pred_log1p: torch.Tensor, target_log1p: torch.Tensor) -> torch.Tensor:
+        target_mm = torch.expm1(target_log1p.float().clamp(0, 8))
+        W = torch.full_like(target_mm, float(self.WEIGHTS[-1]))
+        for node, w in zip(reversed(self.NODES_MM), reversed(self.WEIGHTS[:-1])):
+            W = torch.where(target_mm < node, torch.full_like(W, float(w)), W)
+        mse = (pred_log1p - target_log1p) ** 2
+        mae = torch.abs(pred_log1p - target_log1p)
+        return ((W * mse) + (self.beta * W * mae)).mean() / 2
+
+
+class FocalBCE(nn.Module):
+    """Focal BCE for auxiliary rain/no-rain head."""
+    def __init__(self, gamma: float = 2.0):
+        super().__init__()
+        self.gamma = gamma
+
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        bce = F.binary_cross_entropy(pred, target, reduction="none")
+        pt = torch.exp(-bce)
+        return ((1 - pt) ** self.gamma * bce).mean()
+
+
+class DualHeadLoss(nn.Module):
+    """CB Loss on intensity head + Focal BCE on rain head."""
+    def __init__(self, cb_w: float = 0.7, bce_w: float = 0.3):
+        super().__init__()
+        self.cb  = AdaptedCBLoss()
+        self.bce = FocalBCE()
+        self.cb_w, self.bce_w = cb_w, bce_w
+
+    def forward(self, preds: dict, target_log1p: torch.Tensor) -> torch.Tensor:
+        rain_target = (target_log1p > 0).float()
+        return (self.cb_w  * self.cb(preds["intensity"], target_log1p)
+              + self.bce_w * self.bce(preds["rain"], rain_target))
 
 
 # ---------------------------------------------------------------------------
@@ -387,13 +433,20 @@ def train(args):
                               shuffle=False, num_workers=args.num_workers, pin_memory=pin)
 
     # 3. Model + Loss
-    use_focal = (args.loss_type == "focal")
-    num_classes = NUM_BINS if use_focal else 1
-    in_channels = IN_CHANNELS_18 if args.band_mode == "18slot" else IN_CHANNELS_12
+    use_focal    = (args.loss_type == "focal")
+    use_dual     = (args.loss_type == "dual_head")
+    num_classes  = NUM_BINS if use_focal else 1
+    if args.band_mode == "18slot":
+        in_channels = IN_CHANNELS_18
+    elif args.band_mode == "12slot+diff":
+        in_channels = IN_CHANNELS_12DIFF
+    else:
+        in_channels = IN_CHANNELS_12
     print(f"Building model (band_mode={args.band_mode}, in_channels={in_channels}, "
-          f"cond_dim={COND_DIM}, num_classes={num_classes})...")
+          f"cond_dim={COND_DIM}, num_classes={num_classes}, dual_head={use_dual})...")
     model = build_model(encoder_name=args.encoder, num_classes=num_classes,
-                        in_channels=in_channels, cond_dim=COND_DIM).to(device)
+                        in_channels=in_channels, cond_dim=COND_DIM,
+                        use_dual_head=use_dual).to(device)
     print("Model ready.")
 
     if use_focal:
@@ -405,6 +458,9 @@ def train(args):
         with open(run_dir / "focal_config.json", "w") as f:
             json.dump({"max_val": float(bin_edges[-1]), "bin_edges": bin_edges,
                        "bin_centers": bin_centers, "alpha": alpha, "gamma": args.gamma}, f, indent=2)
+    elif use_dual:
+        criterion    = DualHeadLoss()
+        bin_center_t = None
     else:
         criterion    = CombinedLoss()
         bin_center_t = None
@@ -439,8 +495,13 @@ def train(args):
             optimizer.zero_grad()
             with torch.amp.autocast("cuda", enabled=(device.type == "cuda")):
                 preds = model(inputs, time_feat)
-                preds_41 = center_crop_to_gpm(preds)
-                loss  = criterion(preds_41, targets)
+                if use_dual:
+                    preds_41 = {k: F.interpolate(v, size=GPM_SIZE, mode="bilinear", align_corners=False)
+                                for k, v in preds.items()}
+                    loss = criterion(preds_41, targets)
+                else:
+                    preds_41 = F.interpolate(preds, size=GPM_SIZE, mode="bilinear", align_corners=False)
+                    loss = criterion(preds_41, targets)
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -464,12 +525,16 @@ def train(args):
                     preds = model(inputs, time_feat)
                 targets_real = torch.expm1(targets.float().clamp(0, 8))
                 if use_focal:
-                    preds_41 = center_crop_to_gpm(preds.float())
+                    preds_41 = F.interpolate(preds.float(), size=GPM_SIZE, mode="bilinear", align_corners=False)
                     probs    = F.softmax(preds_41, dim=1)
+                    assert bin_center_t is not None
                     pred_mm  = (probs * bin_center_t).sum(dim=1, keepdim=True)
+                elif use_dual:
+                    preds_41 = F.interpolate(preds["intensity"].float(), size=GPM_SIZE, mode="bilinear", align_corners=False)
+                    pred_mm  = torch.expm1(preds_41.clamp(0, 8))
                 else:
-                    preds_41 = center_crop_to_gpm(preds.float())
-                    pred_mm = torch.expm1(preds_41.clamp(0, 8))
+                    preds_41 = F.interpolate(preds.float(), size=GPM_SIZE, mode="bilinear", align_corners=False)
+                    pred_mm  = torch.expm1(preds_41.clamp(0, 8))
                 sq = (pred_mm - targets_real) ** 2
                 sq_errors.append(sq[torch.isfinite(sq)].cpu().numpy().ravel())
                 rain_mask = (targets_real > 0) & torch.isfinite(sq)
@@ -538,11 +603,11 @@ if __name__ == "__main__":
     parser.add_argument("--early_stop_patience", type=int, default=30,
                         help="Stop training if val RMSE does not improve for this many epochs.")
     parser.add_argument("--band_mode", default="12slot",
-                        choices=["12slot", "18slot"],
-                        help="12slot: 39ch canonical (12 wavelengths x 3 frames + masks); "
-                             "18slot: 57ch canonical (18 wavelengths, zero-pad missing).")
+                        choices=["12slot", "18slot", "12slot+diff"],
+                        help="12slot: 39ch; 18slot: 57ch; 12slot+diff: 51ch (adds 20-min cooling rate).")
     parser.add_argument("--loss_type", default="combined",
-                        help="focal: FocalLossIMERG (14 dynamic log-bins); combined: 0.7*MSE+0.3*MAE regression.")
+                        choices=["combined", "focal", "dual_head"],
+                        help="combined: 0.7*MSE+0.3*MAE; focal: FocalLoss bins; dual_head: CB+FocalBCE.")
     parser.add_argument("--gamma", type=float, default=2.0,
                         help="Focal Loss gamma (focusing parameter). Default 2.0 per GENESIS.")
     parser.add_argument("--ema_decay", type=float, default=0.999,

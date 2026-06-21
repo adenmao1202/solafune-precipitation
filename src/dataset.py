@@ -64,8 +64,9 @@ N_SLOTS_12 = 12
 N_SLOTS_18 = 18
 
 # Input channel counts: n_slots * 3 frames + 3 frame-valid masks
-IN_CHANNELS_12 = N_SLOTS_12 * MAX_FRAMES + MAX_FRAMES  # 39
-IN_CHANNELS_18 = N_SLOTS_18 * MAX_FRAMES + MAX_FRAMES  # 57
+IN_CHANNELS_12     = N_SLOTS_12 * MAX_FRAMES + MAX_FRAMES            # 39
+IN_CHANNELS_18     = N_SLOTS_18 * MAX_FRAMES + MAX_FRAMES            # 57
+IN_CHANNELS_12DIFF = N_SLOTS_12 * MAX_FRAMES + N_SLOTS_12 + MAX_FRAMES  # 51 (36+12+3)
 
 # FiLM conditioning dim: 4 time features + 3 satellite one-hot
 COND_DIM = 7
@@ -77,7 +78,7 @@ SAT_ONEHOT = {
     "meteosat": [0.0, 0.0, 1.0],
 }
 
-# Legacy alias kept for any external scripts that import IN_CHANNELS
+# Legacy alias
 IN_CHANNELS = IN_CHANNELS_12
 
 
@@ -150,8 +151,8 @@ class PrecipDataset(Dataset):
                  is_train: bool = True, transform=None,
                  input_size: tuple[int, int] | None = None,
                  band_mode: str = "12slot"):
-        if band_mode not in ("12slot", "18slot"):
-            raise ValueError(f"band_mode must be '12slot' or '18slot', got '{band_mode}'")
+        if band_mode not in ("12slot", "18slot", "12slot+diff"):
+            raise ValueError(f"band_mode must be '12slot', '18slot', or '12slot+diff', got '{band_mode}'")
         self.df         = pd.read_csv(csv_path)
         self.data_dir   = Path(data_dir)
         self.stats      = stats
@@ -174,7 +175,7 @@ class PrecipDataset(Dataset):
         sat_h, sat_w = SAT_SIZE[satellite]
         out_h, out_w = self.input_size if self.input_size else (sat_h, sat_w)
 
-        n_slots = N_SLOTS_12 if self.band_mode == "12slot" else N_SLOTS_18
+        n_slots = N_SLOTS_18 if self.band_mode == "18slot" else N_SLOTS_12
 
         frames, masks = [], []
         for i in range(MAX_FRAMES):
@@ -197,7 +198,8 @@ class PrecipDataset(Dataset):
                     # Normalize all 16 bands using per-satellite stats
                     arr = normalize_per_band(arr, self.stats, satellite)
                     # Select canonical slots (no Meteosat swap needed)
-                    slot_arr = select_canonical_bands(arr, satellite, self.band_mode)
+                    effective_mode = "12slot" if self.band_mode == "12slot+diff" else self.band_mode
+                    slot_arr = select_canonical_bands(arr, satellite, effective_mode)
                     frames.append(slot_arr)
                     masks.append(np.ones((1, sat_h, sat_w), dtype=np.float32))
                 else:
@@ -207,8 +209,17 @@ class PrecipDataset(Dataset):
                 frames.append(np.zeros((n_slots, sat_h, sat_w), dtype=np.float32))
                 masks.append(np.zeros((1, sat_h, sat_w), dtype=np.float32))
 
-        input_tensor = torch.from_numpy(np.concatenate(frames + masks, axis=0))
-        # shape: (n_slots*3 + 3, sat_h, sat_w)
+        if self.band_mode == "12slot+diff":
+            # Temporal diff: frame_t0 - frame_t-20min (20-min cooling rate)
+            # Both frames must be valid; else diff = zeros
+            if masks[0][0, 0, 0] > 0 and masks[2][0, 0, 0] > 0:
+                diff = frames[2] - frames[0]
+            else:
+                diff = np.zeros_like(frames[0])
+            input_tensor = torch.from_numpy(np.concatenate(frames + [diff] + masks, axis=0))
+        else:
+            input_tensor = torch.from_numpy(np.concatenate(frames + masks, axis=0))
+        # 12slot: 39ch | 18slot: 57ch | 12slot+diff: 51ch
 
         if self.input_size and (sat_h, sat_w) != (out_h, out_w):
             input_tensor = resize_to(input_tensor, (out_h, out_w))
