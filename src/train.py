@@ -544,7 +544,7 @@ if __name__ == "__main__":
                         help="ReduceLROnPlateau patience. Default 5.")
     parser.add_argument("--val_mode", default="temporal",
                         help="temporal: last 20pct per location; holdout: fixed locations as val.")
-    parser.add_argument("--holdout_locations", default="florida,france,jakarta,kinshasa",
+    parser.add_argument("--holdout_locations", default="florida,jakarta,cape_town,friuli_venezia_giulia",
                         help="Comma-separated location names for holdout val (used when --val_mode=holdout).")
     parser.add_argument("--run_name", default=datetime.now().strftime("%Y%m%d_%H%M"),
                         help="Experiment name. Output saved to runs/{run_name}/")
